@@ -1,0 +1,78 @@
+{
+  "name": "agent-workspace",
+  "version": "0.1.0",
+  "description": "Durable retained ProjFS workspaces for parallel build agents",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JACC-Creations/agent_sandboxing_for_pi.dev.git"
+  },
+  "homepage": "https://github.com/JACC-Creations/agent_sandboxing_for_pi.dev#readme",
+  "bugs": {
+    "url": "https://github.com/JACC-Creations/agent_sandboxing_for_pi.dev/issues"
+  },
+  "keywords": [
+    "pi-package"
+  ],
+  "type": "module",
+  "bin": {
+    "agent-workspace": "bin/agent-workspace.mjs"
+  },
+  "exports": {
+    ".": "./src/api.mjs",
+    "./api": "./src/api.mjs"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/agent-workspace/index.ts"
+    ],
+    "skills": [
+      "./skills/agent-workspace"
+    ]
+  },
+  "files": [
+    "bin/",
+    "extensions/",
+    "skills/",
+    "src/",
+    "native/projfs-provider/CMakeLists.txt",
+    "native/projfs-provider/README.md",
+    "native/projfs-provider/bin/win32-x64/SHA256SUMS",
+    "native/projfs-provider/bin/win32-x64/generation-supervisor.exe",
+    "native/projfs-provider/bin/win32-x64/launch-supervisor.exe",
+    "native/projfs-provider/bin/win32-x64/lower-freeze-guard.exe",
+    "native/projfs-provider/bin/win32-x64/projfs-provider.exe",
+    "native/projfs-provider/generation-supervisor.cpp",
+    "native/projfs-provider/launch-supervisor.cpp",
+    "native/projfs-provider/lower-freeze-guard.cpp",
+    "native/projfs-provider/provider.cpp",
+    "native/projfs-provider/provider.manifest",
+    "scripts/inspect-secret-acl.ps1",
+    "scripts/restrict-secret-acl.ps1",
+    "scripts/restrict-secret-directory-acl.ps1",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test --test-concurrency=5 --test-timeout=300000 test/perforce-lifecycle.test.mjs test/cleanup.test.mjs test/perforce-cleanup.test.mjs test/scheduler-heavy.test.mjs test/watcher-supervisor.test.mjs test/provider.test.mjs test/core-lifecycle.test.mjs test/perforce-provisioning.test.mjs test/scheduler.test.mjs test/unit-state-auth.test.mjs && npm run test:leaks",
+    "test:perforce": "node --test --test-concurrency=2 --test-timeout=300000 test/perforce-shelf.test.mjs test/perforce.test.mjs && npm run test:leaks",
+    "test:handoff": "node --test --test-concurrency=1 --test-timeout=300000 test/perforce-handoff-metadata.test.mjs test/perforce-handoff.test.mjs && npm run test:leaks",
+    "test:disposal": "node --test --test-concurrency=1 --test-timeout=300000 test/perforce-disposal.test.mjs && npm run test:leaks",
+    "test:release-core": "npm test && npm run test:perforce",
+    "test:revision-control": "node --test --test-concurrency=1 --test-timeout=120000 test/revision-control.test.mjs",
+    "test:pi": "node --test --test-concurrency=1 --test-timeout=120000 test/pi-integration.test.mjs",
+    "test:native": "node --test --test-concurrency=1 --test-timeout=120000 test/native-supervisor.test.mjs && npm run test:leaks",
+    "test:probes": "python -m unittest native/projfs-provider/test_ubt_probe.py native/projfs-provider/test_ubt_concurrency_probe.py",
+    "test:package": "node scripts/test-package.mjs",
+    "test:release-audit": "node scripts/test-release-audit.mjs",
+    "test:leaks": "powershell.exe -NoProfile -NonInteractive -File scripts/assert-no-test-processes.ps1",
+    "test:all": "npm run test:revision-control && npm run test:release-core && npm run test:handoff && npm run test:disposal && npm run test:pi && npm run test:native && npm run test:probes && npm run test:package && npm run test:release-audit"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}
