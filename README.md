@@ -30,7 +30,7 @@ Install a reviewed local checkout directly, or install a pinned git ref:
 
 ```powershell
 pi install C:\path\to\agent-workspace
-pi install git:https://github.com/JACC-Creations/agent_sandboxing_for_pi.dev.git@v0.1.2
+pi install git:https://github.com/JACC-Creations/agent_sandboxing_for_pi.dev.git@v0.1.3
 ```
 
 The package manifest loads the typed extension and the `agent-workspace` skill together and installs the four win32-x64 native executables. `npm run test:package` verifies the exact executable allowlist, AMD64 PE identity, and every hash in `native/projfs-provider/bin/win32-x64/SHA256SUMS`.
@@ -70,7 +70,9 @@ A committed handoff is the exception to package-owned cleanup: its dedicated rev
 | `agent_workspace_p4_dispose_handoff` | `stateDir`, `brokerUuid`, `taskId` | After cleanup, permanently deletes the exact handed-off shelf, change, and client recorded by the retained receipt. |
 | `agent_workspace_cleanup` | `stateDir`, `brokerUuid` | Destructively cleans the exact retained broker generation. |
 
-Call `agent_workspace_status` immediately before an active-generation mutation and pass its exact `brokerUuid`; stale generations fail before Perforce mutation. Preserve that `stateDir`, `brokerUuid`, and `taskId` before cleanup if a handed-off review may later need disposal. Every mutation requires an interactive confirmation showing the operation, generation, and task (or generation-wide cleanup scope). Disposal confirmation explicitly states permanent shelf → change → client deletion and that a legacy receipt will durably adopt the current project P4 endpoint. Non-interactive calls and declined confirmations fail closed without creating a binding or contacting Perforce. Direct public API disposal accepts only already-bound receipts and the same three retained identity fields; legacy adoption is package-internal to the approved typed tool.
+Call `agent_workspace_status` immediately before an active-generation mutation and pass its exact `brokerUuid`; stale generations fail before Perforce mutation. Preserve that `stateDir`, `brokerUuid`, and `taskId` before cleanup if a handed-off review may later need disposal. `agent_workspace_p4_open`, `agent_workspace_p4_unshelve`, `agent_workspace_p4_checkpoint`, and `agent_workspace_p4_handoff` are routine operations confined to package-owned task resources, so they do not prompt and work without an interactive UI. They still require exact generation and task identity, preserve all broker validation, and fail before mutation if the call is already aborted.
+
+`agent_workspace_cleanup` still requires interactive approval because retained projected roots and human slots may contain user work. `agent_workspace_p4_dispose_handoff` also requires interactive approval because it permanently destroys preserved review resources. Its confirmation explicitly states shelf → change → client deletion and that a legacy receipt will durably adopt the current project P4 endpoint. These destructive tools fail closed without an interactive UI or when confirmation is declined. Direct public API disposal accepts only already-bound receipts and the same three retained identity fields; legacy adoption is package-internal to the approved typed tool.
 
 The typed tools call the broker APIs directly and never expose executable paths, clients, resource nonces, raw Perforce flags, credentials, environment, raw configuration, or protected-base authorization. They therefore do not require an exemption for direct `p4` execution; do not retain qualification-specific direct-P4 exemptions alongside the typed integration.
 

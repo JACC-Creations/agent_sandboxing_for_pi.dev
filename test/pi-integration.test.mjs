@@ -27,7 +27,7 @@ const disposalBrokerUuid = '12345678-1234-4234-9234-123456789abc';
 const disposalTaskId = '20261124112233-abcdef123456';
 const disposalTransaction = '0123456789abcdef0123456789abcdef';
 
-async function setupLegacyDisposalFixture() {
+async function setupDisposalFixture() {
   const temporaryRoot = await fs.mkdtemp(path.join(process.cwd(), 'pi-disposal-refusal-'));
   const stateDir = path.join(temporaryRoot, 'state');
   const registryPath = path.join(temporaryRoot, 'fake-p4.json');
@@ -48,8 +48,17 @@ async function setupLegacyDisposalFixture() {
     `AgentWorkspace-Task: ${disposalTaskId}`,
     'AgentWorkspace-Client: review-client',
   ].join('\n');
+  const fakeP4 = path.resolve(import.meta.dirname, 'fixtures', 'fake-p4.mjs');
+  const serverIdentity = {
+    serverAddress: 'fake:1666',
+    serverRoot: '/fake/server/root',
+    serverServices: 'standard',
+    serverID: 'fake-server-id',
+    caseHandling: 'sensitive',
+    unicode: 'enabled',
+  };
   await fs.writeFile(`${stateDir}.cleanup-receipt.json`, `${JSON.stringify({
-    version: 1,
+    version: 2,
     state: 'completed',
     brokerUuid: disposalBrokerUuid,
     stateDir: path.resolve(stateDir),
@@ -58,6 +67,16 @@ async function setupLegacyDisposalFixture() {
     handoffExclusions: resources,
     nativeSupervisor: false,
     ownedJobs: [],
+    p4Reconnect: {
+      version: 1,
+      executable: process.execPath,
+      port: 'fake:1666',
+      user: 'agent',
+      serverFingerprint: crypto.createHash('sha256').update(JSON.stringify(serverIdentity)).digest('hex'),
+      testMode: true,
+      fakeScript: fakeP4,
+      fakeRegistry: registryPath,
+    },
   }, null, 2)}\n`);
   await fs.writeFile(registryPath, `${JSON.stringify({
     user: 'agent',
@@ -265,6 +284,10 @@ test('Pi package manifest and extension expose only the seven narrow typed tools
     'agent_workspace_cleanup',
   ]);
   assert.equal((extension.match(/executionMode: "sequential"/g) ?? []).length, 6);
+  assert.equal((extension.match(/readOnlyHint: false, destructiveHint: false, idempotentHint: (?:true|false), openWorldHint: true/g) ?? []).length, 4);
+  assert.equal((extension.match(/destructiveHint: true, idempotentHint: true, openWorldHint: true/g) ?? []).length, 2);
+  assert.match(extension, /without interactive approval/);
+  assert.match(extension, /retained projected roots or human slots may contain user work/);
   assert.match(extension, /registerCommand\("revision-control"/);
   assert.match(extension, /getArgumentCompletions: revisionControlCompletions/);
   assert.match(extension, /runRevisionControlCommand\(args, ctx, CONFIG_DIR_NAME\)/);
@@ -285,10 +308,127 @@ test('Pi package manifest and extension expose only the seven narrow typed tools
   assert.match(extension, /permanent deletion in shelf → change → client order/);
 });
 
-test('Pi disposal tool fails closed on decline/no UI and redacts broker failures', async (t) => {
+test('Pi routine P4 tools require identity but not UI and stop before mutation when aborted', async (t) => {
   const tools = await loadExtensionTools(t);
   if (!tools) return;
-  const fixture = await setupLegacyDisposalFixture();
+  const context = await setup(1);
+  try {
+    await run(context.initArgs, { timeout: 20000 });
+    const taskId = await startRetainedTask(context);
+    const brokerUuid = (await inspectAgentWorkspace(context.stateDir)).brokerUuid;
+    const noUiContext = {
+      hasUI: false,
+      ui: { confirm: async () => { assert.fail('routine operations must not request UI confirmation'); } },
+    };
+    const byName = new Map(tools.map((tool) => [tool.name, tool]));
+    const routineCalls = [
+      ['agent_workspace_p4_open', {
+        stateDir: context.stateDir, brokerUuid, taskId, action: 'edit', depotPaths: [normalPath],
+      }],
+      ['agent_workspace_p4_checkpoint', { stateDir: context.stateDir, brokerUuid, taskId }],
+      ['agent_workspace_p4_unshelve', {
+        stateDir: context.stateDir, brokerUuid, taskId, sourceChange: 9000,
+      }],
+      ['agent_workspace_p4_handoff', { stateDir: context.stateDir, brokerUuid, taskId }],
+    ];
+
+    for (const [name, params] of routineCalls) {
+      const tool = byName.get(name);
+      assert.ok(tool);
+      assert.deepEqual(tool.annotations, {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: name.endsWith('checkpoint') || name.endsWith('handoff'),
+        openWorldHint: true,
+      });
+      const registryBeforeAbort = await readJson(context.registry);
+      const controller = new AbortController();
+      controller.abort();
+      const aborted = await tool.execute(`aborted-${name}`, params, controller.signal, undefined, noUiContext);
+      assert.equal(aborted.isError, true);
+      assert.equal((await readJson(context.registry)).log.length, registryBeforeAbort.log.length);
+    }
+
+    const opened = await byName.get('agent_workspace_p4_open').execute(
+      'open-no-ui', routineCalls[0][1], undefined, undefined, noUiContext,
+    );
+    assert.equal(opened.isError, undefined);
+    assert.deepEqual(opened.details.result, { action: 'edit', depotPaths: [normalPath] });
+
+    const checkpointed = await byName.get('agent_workspace_p4_checkpoint').execute(
+      'checkpoint-no-ui', routineCalls[1][1], undefined, undefined, noUiContext,
+    );
+    assert.equal(checkpointed.isError, undefined);
+    assert.equal(checkpointed.details.result.state, 'shelved');
+
+    const registry = await readJson(context.registry);
+    registry.shelves[9000] = [{ depotFile: addedPath, action: 'add', rev: '1' }];
+    await fs.writeFile(context.registry, `${JSON.stringify(registry, null, 2)}\n`);
+    const unshelved = await byName.get('agent_workspace_p4_unshelve').execute(
+      'unshelve-no-ui', routineCalls[2][1], undefined, undefined, noUiContext,
+    );
+    assert.equal(unshelved.isError, undefined);
+    assert.deepEqual(unshelved.details.result.depotPaths, [addedPath]);
+
+    const handedOff = await byName.get('agent_workspace_p4_handoff').execute(
+      'handoff-no-ui', routineCalls[3][1], undefined, undefined, noUiContext,
+    );
+    assert.equal(handedOff.isError, undefined);
+    assert.equal(handedOff.details.result.state, 'committed');
+  } finally {
+    await dispose(context);
+  }
+});
+
+test('Pi cleanup tool requires interactive approval and honors it', async (t) => {
+  const tools = await loadExtensionTools(t);
+  if (!tools) return;
+  const context = await setup(1);
+  try {
+    await run(context.initArgs, { timeout: 20000 });
+    const brokerUuid = (await inspectAgentWorkspace(context.stateDir)).brokerUuid;
+    const tool = tools.find((candidate) => candidate.name === 'agent_workspace_cleanup');
+    assert.ok(tool);
+    assert.deepEqual(tool.annotations, {
+      readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true,
+    });
+    const params = { stateDir: context.stateDir, brokerUuid };
+    let confirmCalls = 0;
+    const noUi = await tool.execute('cleanup-no-ui', params, undefined, undefined, {
+      hasUI: false,
+      ui: { confirm: async () => { confirmCalls += 1; return true; } },
+    });
+    assert.equal(noUi.isError, true);
+    assert.equal(noUi.details.error.code, 'approval_required');
+    assert.equal(confirmCalls, 0);
+    await fs.access(context.stateDir);
+
+    const declined = await tool.execute('cleanup-declined', params, undefined, undefined, {
+      hasUI: true,
+      ui: { confirm: async () => { confirmCalls += 1; return false; } },
+    });
+    assert.equal(declined.isError, true);
+    assert.equal(declined.details.error.code, 'approval_required');
+    assert.equal(confirmCalls, 1);
+    await fs.access(context.stateDir);
+
+    let confirmationText = '';
+    const approved = await tool.execute('cleanup-approved', params, undefined, undefined, {
+      hasUI: true,
+      ui: { confirm: async (_title, text) => { confirmationText = text; return true; } },
+    });
+    assert.equal(approved.isError, undefined);
+    assert.match(confirmationText, /destructive retained-pool generation reset/);
+    await assert.rejects(fs.access(context.stateDir), { code: 'ENOENT' });
+  } finally {
+    await dispose(context);
+  }
+});
+
+test('Pi disposal tool fails closed on decline/no UI, honors approval, and redacts broker failures', async (t) => {
+  const tools = await loadExtensionTools(t);
+  if (!tools) return;
+  const fixture = await setupDisposalFixture();
   const redactionStateDir = path.join(process.cwd(), 'private-disposal-ticket');
   t.after(async () => {
     await fs.rm(fixture.temporaryRoot, { recursive: true, force: true });
@@ -299,6 +439,9 @@ test('Pi disposal tool fails closed on decline/no UI and redacts broker failures
   const tool = tools.find((candidate) => candidate.name === 'agent_workspace_p4_dispose_handoff');
   assert.ok(tool);
   assert.equal(tool.executionMode, 'sequential');
+  assert.deepEqual(tool.annotations, {
+    readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true,
+  });
   assert.deepEqual(Object.keys(tool.parameters.properties).sort(), ['brokerUuid', 'stateDir', 'taskId']);
   assert.equal(tool.parameters.additionalProperties, false);
 
@@ -344,6 +487,17 @@ test('Pi disposal tool fails closed on decline/no UI and redacts broker failures
   assert.equal(JSON.stringify(failed).includes('private-disposal-ticket'), false);
   assert.equal(JSON.stringify(failed).includes('review-client'), false);
   assert.deepEqual(Object.keys(failed.details.error).sort(), ['code', 'message']);
+
+  const approved = await tool.execute('call-approved', params, undefined, undefined, {
+    hasUI: true,
+    ui: { confirm: async () => true },
+  });
+  assert.equal(approved.isError, undefined);
+  assert.equal(approved.details.result.state, 'completed');
+  const disposedRegistry = await readJson(fixture.registryPath);
+  assert.deepEqual(disposedRegistry.clients, {});
+  assert.deepEqual(disposedRegistry.changes, {});
+  assert.deepEqual(disposedRegistry.shelves, {});
 });
 
 async function loadExtensionTools(t) {

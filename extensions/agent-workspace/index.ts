@@ -107,6 +107,10 @@ function publicErrorMessage(code: string) {
 	return "The broker operation failed; inspect trusted local broker diagnostics for details.";
 }
 
+function requireMutationNotAborted(signal: AbortSignal | undefined) {
+	if (signal?.aborted) throw new Error("operation aborted before broker mutation began");
+}
+
 async function approveMutation(
 	ctx: MutationContext,
 	signal: AbortSignal | undefined,
@@ -153,18 +157,15 @@ const statusTool = defineTool({
 const openTool = defineTool({
 	name: "agent_workspace_p4_open",
 	label: "Agent Workspace P4 Open",
-	description: "Open unique absolute depot paths for edit, add, or delete in a retained task after interactive approval.",
+	description: "Open unique absolute depot paths for edit, add, or delete within a package-owned retained task without interactive approval.",
 	exposure: "direct",
 	executionMode: "sequential",
-	annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+	annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
 	parameters: OpenSchema,
 	outputSchema: ResultSchema,
-	async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+	async execute(_toolCallId, params, signal) {
 		try {
-			await approveMutation(ctx, signal, "P4 open", params.brokerUuid, params.taskId, [
-				`Action: ${params.action}`,
-				`Depot paths: ${params.depotPaths.join(", ")}`,
-			]);
+			requireMutationNotAborted(signal);
 			const value = await openAgentWorkspaceP4({
 				stateDir: params.stateDir,
 				expectedBrokerUuid: params.brokerUuid,
@@ -183,17 +184,15 @@ const openTool = defineTool({
 const unshelveTool = defineTool({
 	name: "agent_workspace_p4_unshelve",
 	label: "Agent Workspace P4 Unshelve",
-	description: "Unshelve one positive source changelist into a retained task after interactive approval.",
+	description: "Unshelve one positive source changelist into a package-owned retained task without interactive approval.",
 	exposure: "direct",
 	executionMode: "sequential",
-	annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+	annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
 	parameters: UnshelveSchema,
 	outputSchema: ResultSchema,
-	async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+	async execute(_toolCallId, params, signal) {
 		try {
-			await approveMutation(ctx, signal, "P4 unshelve", params.brokerUuid, params.taskId, [
-				`Source change: ${params.sourceChange}`,
-			]);
+			requireMutationNotAborted(signal);
 			const value = await unshelveAgentWorkspaceP4({
 				stateDir: params.stateDir,
 				expectedBrokerUuid: params.brokerUuid,
@@ -211,15 +210,15 @@ const unshelveTool = defineTool({
 const checkpointTool = defineTool({
 	name: "agent_workspace_p4_checkpoint",
 	label: "Agent Workspace P4 Checkpoint",
-	description: "Create or replace the retained task's stable shelf checkpoint after interactive approval.",
+	description: "Create or replace a package-owned retained task's stable shelf checkpoint without interactive approval.",
 	exposure: "direct",
 	executionMode: "sequential",
-	annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+	annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
 	parameters: TaskMutationSchema,
 	outputSchema: ResultSchema,
-	async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+	async execute(_toolCallId, params, signal) {
 		try {
-			await approveMutation(ctx, signal, "P4 checkpoint", params.brokerUuid, params.taskId, []);
+			requireMutationNotAborted(signal);
 			const value = await checkpointAgentWorkspaceP4({
 				stateDir: params.stateDir,
 				expectedBrokerUuid: params.brokerUuid,
@@ -236,18 +235,15 @@ const checkpointTool = defineTool({
 const handoffTool = defineTool({
 	name: "agent_workspace_p4_handoff",
 	label: "Agent Workspace P4 Handoff",
-	description: "Copy a task's stable shelf server-side into dedicated review resources and permanently seal the task after interactive approval.",
+	description: "Copy a package-owned task's stable shelf into dedicated review resources and permanently seal the task without interactive approval.",
 	exposure: "direct",
 	executionMode: "sequential",
-	annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+	annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
 	parameters: TaskMutationSchema,
 	outputSchema: ResultSchema,
-	async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+	async execute(_toolCallId, params, signal) {
 		try {
-			await approveMutation(ctx, signal, "P4 review handoff", params.brokerUuid, params.taskId, [
-				"Effect: server-side shelf copy into preserved review resources",
-				"Task sealing: permanent; rerun and further Perforce mutations will be refused",
-			]);
+			requireMutationNotAborted(signal);
 			const value = await handoffAgentWorkspaceP4({
 				stateDir: params.stateDir,
 				expectedBrokerUuid: params.brokerUuid,
@@ -264,7 +260,7 @@ const handoffTool = defineTool({
 const disposeHandoffTool = defineTool({
 	name: "agent_workspace_p4_dispose_handoff",
 	label: "Agent Workspace P4 Dispose Handoff",
-	description: "Permanently delete a handed-off review shelf, change, and client after broker cleanup, using only its retained receipt identity.",
+	description: "Permanently delete preserved handed-off review resources after broker cleanup, using retained receipt identity and interactive approval.",
 	exposure: "direct",
 	executionMode: "sequential",
 	annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
@@ -293,7 +289,7 @@ const disposeHandoffTool = defineTool({
 const cleanupTool = defineTool({
 	name: "agent_workspace_cleanup",
 	label: "Agent Workspace Cleanup",
-	description: "Destructively clean one exact broker generation and reset its retained pool after interactive approval.",
+	description: "Destructively clean one exact broker generation after interactive approval because retained projected roots or human slots may contain user work.",
 	exposure: "direct",
 	executionMode: "sequential",
 	annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
