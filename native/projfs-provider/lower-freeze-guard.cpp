@@ -4,10 +4,12 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -70,8 +72,8 @@ namespace
 			}
 			Overlapped = {};
 			Overlapped.hEvent = Event;
-			if (ReadDirectoryChangesW(Directory, Buffer, BufferByteCount, TRUE,
-				ChangeFilter, nullptr, &Overlapped, nullptr) == FALSE)
+			if (ReadDirectoryChangesExW(Directory, Buffer, BufferByteCount, TRUE,
+				ChangeFilter, nullptr, &Overlapped, nullptr, ReadDirectoryNotifyExtendedInformation) == FALSE)
 			{
 				return false;
 			}
@@ -314,17 +316,106 @@ namespace
 		return Error ? std::nullopt : std::optional<FOptions>(Options);
 	}
 
-	bool IsExcludedRelativePath(const std::wstring& RelativePath)
+	struct FCaseInsensitiveLess
 	{
-		if (RelativePath.size() < 3 || _wcsnicmp(RelativePath.c_str(), L".vs", 3) != 0)
+		bool operator()(const std::wstring& Left, const std::wstring& Right) const
 		{
-			return false;
+			return _wcsicmp(Left.c_str(), Right.c_str()) < 0;
 		}
-		return RelativePath.size() == 3 || RelativePath[3] == L'\\' || RelativePath[3] == L'/';
-	}
+	};
+
+	class FRootDotDirectoryPolicy
+	{
+	public:
+		bool Snapshot(const std::filesystem::path& Lower)
+		{
+			WIN32_FIND_DATAW FindData{};
+			const std::filesystem::path SearchPath = Lower / L"*";
+			HANDLE Find = FindFirstFileExW(SearchPath.c_str(), FindExInfoBasic, &FindData,
+				FindExSearchNameMatch, nullptr, FIND_FIRST_EX_LARGE_FETCH);
+			if (Find == INVALID_HANDLE_VALUE)
+			{
+				return GetLastError() == ERROR_FILE_NOT_FOUND;
+			}
+			for (;;)
+			{
+				if (FindData.cFileName[0] == L'.' && FindData.cFileName[1] != L'\0'
+					&& wcscmp(FindData.cFileName, L"..") != 0
+					&& (FindData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+				{
+					RootDirectories.emplace(FindData.cFileName);
+				}
+				if (FindNextFileW(Find, &FindData) == FALSE)
+				{
+					break;
+				}
+			}
+			const DWORD Error = GetLastError();
+			FindClose(Find);
+			return Error == ERROR_NO_MORE_FILES;
+		}
+
+		bool IsIgnored(const std::wstring& RelativePath, const DWORD Action, const DWORD Attributes)
+		{
+			if (PendingIgnoredRename && Action != FILE_ACTION_RENAMED_NEW_NAME)
+			{
+				bMalformedRename = true;
+				return false;
+			}
+
+			const size_t Separator = RelativePath.find_first_of(L"\\/");
+			const bool bExactRootEntry = Separator == std::wstring::npos;
+			const std::wstring RootComponent = RelativePath.substr(0, Separator);
+			bool bIgnored = RootDirectories.contains(RootComponent);
+			if (bExactRootEntry && RootComponent.size() > 1 && RootComponent[0] == L'.'
+				&& (Attributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+			{
+				RootDirectories.emplace(RootComponent);
+				bIgnored = true;
+			}
+			if (bExactRootEntry && (Attributes & FILE_ATTRIBUTE_DIRECTORY) == 0
+				&& Action != FILE_ACTION_REMOVED && Action != FILE_ACTION_RENAMED_OLD_NAME)
+			{
+				bIgnored = false;
+			}
+
+			if (Action == FILE_ACTION_RENAMED_OLD_NAME)
+			{
+				PendingIgnoredRename = bIgnored;
+				return bIgnored;
+			}
+			if (Action != FILE_ACTION_RENAMED_NEW_NAME)
+			{
+				return bIgnored;
+			}
+			if (!PendingIgnoredRename.has_value())
+			{
+				bMalformedRename = true;
+				return false;
+			}
+			const bool bIgnoredOldName = *PendingIgnoredRename;
+			PendingIgnoredRename.reset();
+			return bIgnoredOldName && bIgnored;
+		}
+
+		bool HasMalformedRename() const
+		{
+			return bMalformedRename;
+		}
+
+		bool HasPendingRename() const
+		{
+			return PendingIgnoredRename.has_value();
+		}
+
+	private:
+		std::set<std::wstring, FCaseInsensitiveLess> RootDirectories;
+		std::optional<bool> PendingIgnoredRename;
+		bool bMalformedRename = false;
+	};
 
 	bool ParseEvents(const std::array<std::byte, BufferSize>& Buffer, const DWORD Bytes,
-		std::wstring& FirstAction, std::wstring& FirstRelativePath)
+		FRootDotDirectoryPolicy& Policy, std::wstring& FirstAction, std::wstring& FirstRelativePath)
 	{
 		if (Bytes == 0)
 		{
@@ -333,42 +424,45 @@ namespace
 		DWORD Offset = 0;
 		while (true)
 		{
-			if (Bytes - Offset < offsetof(FILE_NOTIFY_INFORMATION, FileName))
+			const DWORD HeaderSize = static_cast<DWORD>(offsetof(FILE_NOTIFY_EXTENDED_INFORMATION, FileName));
+			if (Bytes - Offset < HeaderSize)
 			{
 				return false;
 			}
-			const auto* Information = reinterpret_cast<const FILE_NOTIFY_INFORMATION*>(Buffer.data() + Offset);
-			const DWORD HeaderSize = static_cast<DWORD>(offsetof(FILE_NOTIFY_INFORMATION, FileName));
-			if ((Information->FileNameLength % sizeof(wchar_t)) != 0
-				|| Information->FileNameLength > Bytes - Offset - HeaderSize)
+			FILE_NOTIFY_EXTENDED_INFORMATION Information{};
+			memcpy(&Information, Buffer.data() + Offset, HeaderSize);
+			if ((Information.FileNameLength % sizeof(wchar_t)) != 0
+				|| Information.FileNameLength > Bytes - Offset - HeaderSize)
 			{
 				return false;
 			}
-			if (Information->Action < FILE_ACTION_ADDED || Information->Action > FILE_ACTION_RENAMED_NEW_NAME)
+			if (Information.Action < FILE_ACTION_ADDED || Information.Action > FILE_ACTION_RENAMED_NEW_NAME)
 			{
 				return false;
 			}
-			std::wstring RelativePath(Information->FileName, Information->FileNameLength / sizeof(wchar_t));
+			const auto* FileName = reinterpret_cast<const wchar_t*>(Buffer.data() + Offset + HeaderSize);
+			std::wstring RelativePath(FileName, Information.FileNameLength / sizeof(wchar_t));
 			if (RelativePath.empty())
 			{
 				return false;
 			}
-			if (FirstRelativePath.empty() && !IsExcludedRelativePath(RelativePath))
+			const bool bIgnored = Policy.IsIgnored(RelativePath, Information.Action, Information.FileAttributes);
+			if (FirstRelativePath.empty() && !bIgnored)
 			{
-				FirstAction = ActionName(Information->Action);
+				FirstAction = ActionName(Information.Action);
 				FirstRelativePath = std::move(RelativePath);
 			}
-			if (Information->NextEntryOffset == 0)
+			if (Information.NextEntryOffset == 0)
 			{
-				return true;
+				return !Policy.HasMalformedRename();
 			}
-			const DWORD RecordSize = HeaderSize + Information->FileNameLength;
-			if ((Information->NextEntryOffset % sizeof(DWORD)) != 0
-				|| Information->NextEntryOffset < RecordSize || Information->NextEntryOffset >= Bytes - Offset)
+			const DWORD RecordSize = HeaderSize + Information.FileNameLength;
+			if ((Information.NextEntryOffset % sizeof(DWORD)) != 0
+				|| Information.NextEntryOffset < RecordSize || Information.NextEntryOffset >= Bytes - Offset)
 			{
 				return false;
 			}
-			Offset += Information->NextEntryOffset;
+			Offset += Information.NextEntryOffset;
 		}
 	}
 }
@@ -396,7 +490,7 @@ int wmain(const int ArgumentCount, wchar_t** Arguments)
 		std::cerr << "could not establish lower root identity\n";
 		return 3;
 	}
-	alignas(DWORD) std::array<std::array<std::byte, BufferSize>, 2> Buffers{};
+	alignas(FILE_NOTIFY_EXTENDED_INFORMATION) std::array<std::array<std::byte, BufferSize>, 2> Buffers{};
 	std::size_t ActiveBuffer = 0;
 	FUniqueHandle Event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
 	if (Event.get() == nullptr)
@@ -407,6 +501,12 @@ int wmain(const int ArgumentCount, wchar_t** Arguments)
 	if (!Watch.Arm(Buffers[ActiveBuffer].data(), static_cast<DWORD>(Buffers[ActiveBuffer].size())))
 	{
 		Quarantine(Options, *Identity, "watch registration failed", L"watcher_error", L"");
+		return 4;
+	}
+	FRootDotDirectoryPolicy Policy;
+	if (!Policy.Snapshot(Options.Lower))
+	{
+		Quarantine(Options, *Identity, "root dot-directory snapshot failed", L"watcher_error", L"");
 		return 4;
 	}
 	if (!AtomicWrite(Options.State, StateJson(Options, *Identity, "ready")))
@@ -427,6 +527,11 @@ int wmain(const int ArgumentCount, wchar_t** Arguments)
 		const DWORD Wait = WaitForSingleObject(Event.get(), 1000);
 		if (Wait == WAIT_TIMEOUT)
 		{
+			if (Policy.HasPendingRename())
+			{
+				return Quarantine(Options, *Identity, "incomplete directory rename notification",
+					L"malformed_event", L"") ? 5 : 6;
+			}
 			if (!IdentityMatches(Directory.get(), *Identity))
 			{
 				return Quarantine(Options, *Identity, "lower root identity or path changed", L"root_identity_change", L"") ? 5 : 6;
@@ -460,7 +565,7 @@ int wmain(const int ArgumentCount, wchar_t** Arguments)
 
 		std::wstring Action;
 		std::wstring RelativePath;
-		if (!ParseEvents(Buffers[CompletedBuffer], Bytes, Action, RelativePath))
+		if (!ParseEvents(Buffers[CompletedBuffer], Bytes, Policy, Action, RelativePath))
 		{
 			return Quarantine(Options, *Identity, "malformed directory notification", L"malformed_event", L"") ? 5 : 6;
 		}

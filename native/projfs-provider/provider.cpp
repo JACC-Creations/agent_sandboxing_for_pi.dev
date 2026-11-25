@@ -467,7 +467,10 @@ private:
 			{
 				continue;
 			}
-			if (RelativePath.empty() && IsExcludedRelativePath(FindData.cFileName))
+			const std::wstring EntryRelativePath = RelativePath.empty()
+				? FindData.cFileName
+				: RelativePath + L"\\" + FindData.cFileName;
+			if (IsExcludedRelativePath(EntryRelativePath.c_str()))
 			{
 				continue;
 			}
@@ -596,13 +599,20 @@ private:
 		return S_OK;
 	}
 
-	static bool IsExcludedRelativePath(PCWSTR RelativePath)
+	bool IsExcludedRelativePath(PCWSTR RelativePath) const
 	{
-		if (RelativePath == nullptr || _wcsnicmp(RelativePath, L".vs", 3) != 0)
+		if (RelativePath == nullptr || RelativePath[0] != L'.')
 		{
 			return false;
 		}
-		return RelativePath[3] == L'\0' || RelativePath[3] == L'\\' || RelativePath[3] == L'/';
+		const size_t ComponentLength = wcscspn(RelativePath, L"\\/");
+		if (ComponentLength == 0)
+		{
+			return false;
+		}
+		const std::wstring RootComponent(RelativePath, ComponentLength);
+		const DWORD Attributes = GetFileAttributesW(MakeLowerPath(RootComponent.c_str()).c_str());
+		return Attributes != INVALID_FILE_ATTRIBUTES && (Attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 	}
 
 	bool IsSafeRelativePath(PCWSTR RelativePath) const

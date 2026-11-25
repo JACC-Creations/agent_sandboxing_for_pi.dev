@@ -50,6 +50,14 @@ $processes = @()
 try {
     Set-Content -LiteralPath (Join-Path $lower 'edit.txt') -Value 'baseline'
     New-Item -ItemType Directory -Path (Join-Path $lower '.Vs\UE\v17\ipch') | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $lower '.UgS\CaChE') | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $lower '.cache-data\objects') | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $lower 'nested') | Out-Null
+    Set-Content -LiteralPath (Join-Path $lower '.editorconfig') -Value 'editor config'
+    Set-Content -LiteralPath (Join-Path $lower '.loreignore') -Value 'lore ignore'
+    Set-Content -LiteralPath (Join-Path $lower '.p4ignore.txt') -Value 'p4 ignore'
+    Set-Content -LiteralPath (Join-Path $lower '.vsconfig') -Value 'vs config'
+
     $outside = Start-Watcher 'outside'
     $processes += $outside.Process
     Set-Content -LiteralPath (Join-Path $testRoot 'outside-lower.txt') -Value 'outside'
@@ -59,23 +67,73 @@ try {
     Stop-Process -Id $outside.Process.Id
     $outside.Process.WaitForExit(10000) | Out-Null
 
-    $vsIgnore = Start-Watcher 'vs-ignore'; $processes += $vsIgnore.Process
-    Set-Content -LiteralPath (Join-Path $lower '.Vs\UE\v17\ipch\mutable.ipch') -Value 'cache write'
-    Add-Content -LiteralPath (Join-Path $lower '.Vs\UE\v17\ipch\mutable.ipch') -Value 'cache rewrite'
-    Start-Sleep -Milliseconds 500
-    $vsIgnore.Process.Refresh()
-    if ($vsIgnore.Process.HasExited -or (Test-Path $vsIgnore.Quarantine)) { throw 'root .vs mutation was not ignored' }
-    Set-Content -LiteralPath (Join-Path $lower 'source-after-vs.txt') -Value 'source mutation'
-    Wait-Quarantine $vsIgnore 'added' 'source-after-vs.txt'
+    foreach ($case in @(
+        @{ Label = 'vs-ignore'; Path = '.Vs\UE\v17\ipch\mutable.ipch' },
+        @{ Label = 'ugs-ignore'; Path = '.UgS\CaChE\mutable.json' },
+        @{ Label = 'generic-ignore'; Path = '.cache-data\objects\mutable.bin' }
+    )) {
+        $watch = Start-Watcher $case.Label; $processes += $watch.Process
+        Set-Content -LiteralPath (Join-Path $lower $case.Path) -Value 'cache write'
+        Add-Content -LiteralPath (Join-Path $lower $case.Path) -Value 'cache rewrite'
+        Start-Sleep -Milliseconds 300
+        $watch.Process.Refresh()
+        if ($watch.Process.HasExited -or (Test-Path $watch.Quarantine)) { throw "root dot-directory mutation was not ignored: $($case.Path)" }
+        $protectedName = "protected-after-$($case.Label).txt"
+        Set-Content -LiteralPath (Join-Path $lower $protectedName) -Value 'source mutation'
+        Wait-Quarantine $watch 'added' $protectedName
+    }
 
-    $vsPrefix = Start-Watcher 'vs-prefix'; $processes += $vsPrefix.Process
-    New-Item -ItemType Directory -Path (Join-Path $lower '.vs-other') | Out-Null
-    Wait-Quarantine $vsPrefix 'added' '.vs-other'
+    foreach ($dotFile in @('.editorconfig', '.loreignore', '.p4ignore.txt', '.vsconfig')) {
+        $label = 'dotfile-' + $dotFile.TrimStart('.').Replace('.', '-')
+        $watch = Start-Watcher $label; $processes += $watch.Process
+        Add-Content -LiteralPath (Join-Path $lower $dotFile) -Value 'protected mutation'
+        Wait-Quarantine $watch 'modified' $dotFile
+    }
 
-    New-Item -ItemType Directory -Path (Join-Path $lower 'nested') | Out-Null
-    $nestedVs = Start-Watcher 'nested-vs'; $processes += $nestedVs.Process
+    $nestedDotDirectory = Start-Watcher 'nested-dot-directory'; $processes += $nestedDotDirectory.Process
     New-Item -ItemType Directory -Path (Join-Path $lower 'nested\.vs') | Out-Null
-    Wait-Quarantine $nestedVs 'added' 'nested\.vs'
+    Wait-Quarantine $nestedDotDirectory 'added' 'nested\.vs'
+
+    $newRootDotDirectory = Start-Watcher 'new-root-dot-directory'; $processes += $newRootDotDirectory.Process
+    New-Item -ItemType Directory -Path (Join-Path $lower '.new-cache') | Out-Null
+    Set-Content -LiteralPath (Join-Path $lower '.new-cache\private.bin') -Value 'new cache'
+    Start-Sleep -Milliseconds 300
+    $newRootDotDirectory.Process.Refresh()
+    if ($newRootDotDirectory.Process.HasExited -or (Test-Path $newRootDotDirectory.Quarantine)) { throw 'new root dot-directory was not safely recognized' }
+    Set-Content -LiteralPath (Join-Path $lower 'protected-after-new-cache.txt') -Value 'source mutation'
+    Wait-Quarantine $newRootDotDirectory 'added' 'protected-after-new-cache.txt'
+
+    $newRootDotFile = Start-Watcher 'new-root-dotfile'; $processes += $newRootDotFile.Process
+    Set-Content -LiteralPath (Join-Path $lower '.new-dotfile') -Value 'protected dotfile'
+    Wait-Quarantine $newRootDotFile 'added' '.new-dotfile'
+
+    New-Item -ItemType Directory -Path (Join-Path $lower '.delete-cache\child') | Out-Null
+    Set-Content -LiteralPath (Join-Path $lower '.delete-cache\child\entry.bin') -Value 'delete cache'
+    $deleteRootDotDirectory = Start-Watcher 'delete-root-dot-directory'; $processes += $deleteRootDotDirectory.Process
+    Remove-Item -LiteralPath (Join-Path $lower '.delete-cache') -Recurse
+    Start-Sleep -Milliseconds 300
+    $deleteRootDotDirectory.Process.Refresh()
+    if ($deleteRootDotDirectory.Process.HasExited -or (Test-Path $deleteRootDotDirectory.Quarantine)) { throw 'exact root dot-directory deletion was not ignored' }
+    Set-Content -LiteralPath (Join-Path $lower 'protected-after-delete-cache.txt') -Value 'source mutation'
+    Wait-Quarantine $deleteRootDotDirectory 'added' 'protected-after-delete-cache.txt'
+
+    New-Item -ItemType Directory -Path (Join-Path $lower '.rename-cache') | Out-Null
+    $renameWithinPolicy = Start-Watcher 'rename-within-policy'; $processes += $renameWithinPolicy.Process
+    Rename-Item -LiteralPath (Join-Path $lower '.rename-cache') -NewName '.renamed-cache'
+    Set-Content -LiteralPath (Join-Path $lower '.renamed-cache\entry.bin') -Value 'renamed cache'
+    Start-Sleep -Milliseconds 300
+    $renameWithinPolicy.Process.Refresh()
+    if ($renameWithinPolicy.Process.HasExited -or (Test-Path $renameWithinPolicy.Quarantine)) { throw 'root dot-directory rename within policy was not ignored' }
+    Set-Content -LiteralPath (Join-Path $lower 'protected-after-dot-rename.txt') -Value 'source mutation'
+    Wait-Quarantine $renameWithinPolicy 'added' 'protected-after-dot-rename.txt'
+
+    $renameAcrossBoundary = Start-Watcher 'rename-across-boundary'; $processes += $renameAcrossBoundary.Process
+    Rename-Item -LiteralPath (Join-Path $lower '.renamed-cache') -NewName 'renamed-cache'
+    Wait-Quarantine $renameAcrossBoundary 'renamed' 'renamed-cache'
+
+    $renameIntoPolicy = Start-Watcher 'rename-into-policy'; $processes += $renameIntoPolicy.Process
+    Rename-Item -LiteralPath (Join-Path $lower 'renamed-cache') -NewName '.renamed-cache-again'
+    Wait-Quarantine $renameIntoPolicy 'renamed' 'renamed-cache'
 
     for ($index = 0; $index -lt 8; ++$index) {
         $burst = Start-Watcher "burst-$index"; $processes += $burst.Process
@@ -112,9 +170,13 @@ try {
         lower = $lower
         events = @('edit', 'create', 'delete', 'rename')
         outsideLowerIgnored = $true
-        rootVsIgnored = $true
+        existingRootDotDirectoriesIgnored = $true
+        newRootDotDirectoryRecognized = $true
+        rootDotfilesProtected = $true
+        nestedDotDirectoriesProtected = $true
+        exactDeleteAndRenameHandled = $true
+        renameBoundaryProtected = $true
         postIgnoreSourceMutationDetected = $true
-        nonExactVsNamesDetected = $true
         ignoredBurstContinuityIterations = 8
         overflowFailsClosed = $true
         watcherErrorFailsClosed = $true

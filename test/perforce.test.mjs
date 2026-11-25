@@ -9,6 +9,7 @@ import {
   checkpoint,
   cleanupResources,
   createP4,
+  defaultP4CommandTimeoutMs,
   ensureStableTaskChange,
   findPlannedTaskChange,
   importShelf,
@@ -177,6 +178,22 @@ test('createP4 and worker environments strip credential names case-insensitively
       { P4CLIENT: 'worker-1', P4PORT: 'ssl:server:1666', P4USER: 'agent', P4CHARSET: 'utf8' },
     );
     assert.deepEqual(env, { PATH: 'safe', P4CLIENT: 'worker-1', P4PORT: 'ssl:server:1666', P4USER: 'agent', P4CHARSET: 'utf8', P4EDITOR: '' });
+  } finally {
+    await dispose(context);
+  }
+});
+
+test('createP4 defaults to a bounded 60-second command timeout and preserves explicit overrides', async () => {
+  assert.equal(defaultP4CommandTimeoutMs, 60_000);
+  const context = await setup();
+  try {
+    const p4 = createP4({
+      testMode: true,
+      fakeScript,
+      env: { FAKE_P4_REGISTRY: context.registry, AGENT_WORKSPACE_TEST_P4_DELAY_MS: '100' },
+      timeoutMs: 10,
+    });
+    await assert.rejects(p4.run(['info']), /timed out after 10ms/);
   } finally {
     await dispose(context);
   }

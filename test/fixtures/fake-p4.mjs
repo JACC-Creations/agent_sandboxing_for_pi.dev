@@ -4,6 +4,8 @@ import path from 'node:path';
 const registryPath = process.env.FAKE_P4_REGISTRY;
 if (!registryPath) throw new Error('FAKE_P4_REGISTRY is required');
 const argv = process.argv.slice(2);
+const delayMs = Number(process.env.AGENT_WORKSPACE_TEST_P4_DELAY_MS ?? 0);
+if (Number.isFinite(delayMs) && delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
 let input = '';
 for await (const chunk of process.stdin) input += chunk;
 

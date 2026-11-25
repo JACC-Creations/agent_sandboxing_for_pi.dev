@@ -9,6 +9,8 @@ const secretEnvironmentNames = new Set(['P4PASSWD', 'P4TICKETS', 'P4CONFIG', 'P4
 const serverIdentityFields = ['serverAddress', 'serverRoot', 'serverServices', 'serverName', 'serverID', 'caseHandling', 'unicode'];
 const validatedBaselines = new WeakSet();
 
+export const defaultP4CommandTimeoutMs = 60_000;
+
 function requireText(value, name) {
   if (typeof value !== 'string' || value.length === 0 || /[\r\n\0]/.test(value)) throw new Error(`${name} must be non-empty text without control newlines`);
   return value;
@@ -98,7 +100,7 @@ export function formatP4Form(fields) {
 }
 
 export function createP4(options = {}) {
-  const timeoutMs = options.timeoutMs ?? 10_000;
+  const timeoutMs = options.timeoutMs ?? defaultP4CommandTimeoutMs;
   const maxOutputBytes = options.maxOutputBytes ?? 1024 * 1024;
   const maxBoundedOutputBytes = options.maxBoundedOutputBytes ?? 8 * 1024 * 1024;
   const maxShelvedFileBytes = options.maxShelvedFileBytes ?? 256 * 1024 * 1024;

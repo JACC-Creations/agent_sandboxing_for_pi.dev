@@ -1,6 +1,6 @@
 {
   "name": "agent-workspace",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Durable retained ProjFS workspaces for parallel build agents",
   "repository": {
     "type": "git",
