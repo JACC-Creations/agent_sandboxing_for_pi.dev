@@ -48,7 +48,7 @@ assert.equal(packageJson.homepage, `${repositoryBase}#readme`);
 assert.deepEqual(packageJson.bugs, { url: `${repositoryBase}/issues` });
 
 const readme = await fs.readFile(path.join(projectRoot, "README.md"), "utf8");
-const pinnedInstallCommand = `pi install git:${canonicalOrigin}@v0.1.0`;
+const pinnedInstallCommand = `pi install git:${canonicalOrigin}@v0.1.1`;
 assert.ok(readme.includes(pinnedInstallCommand), `README must contain: ${pinnedInstallCommand}`);
 
 const origin = git(["config", "--get", "remote.origin.url"]).trim();

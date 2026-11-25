@@ -115,12 +115,56 @@ export async function durableReplaceWindows(sourcePath, targetPath, internals = 
 }
 
 export async function withLifecycleLock(stateDir, callback, options = {}) {
-  const lifecycleStateDir = `${path.resolve(stateDir)}.lifecycle`;
-  return withLock(lifecycleStateDir, 'broker', callback, {
-    timeoutMs: options.timeoutMs ?? 30000,
-    staleMs: options.staleMs ?? 30000,
-    ...options,
-  });
+  const resolvedStateDir = path.resolve(stateDir);
+  const lifecycleStateDir = `${resolvedStateDir}.lifecycle`;
+  let callbackEntered = false;
+  try {
+    return await withLock(lifecycleStateDir, 'broker', async () => {
+      callbackEntered = true;
+      return callback();
+    }, {
+      timeoutMs: options.timeoutMs ?? 30000,
+      staleMs: options.staleMs ?? 30000,
+      ...options,
+    });
+  } finally {
+    if (callbackEntered) await pruneLifecycleState(resolvedStateDir, lifecycleStateDir);
+  }
+}
+
+async function pruneLifecycleState(stateDir, lifecycleStateDir) {
+  if (await pathExists(stateDir)) return;
+
+  const locksPath = statePaths(lifecycleStateDir).locks;
+  if (!await removeEmptyDirectory(locksPath)) return;
+  if (await pathExists(stateDir)) {
+    await fs.mkdir(locksPath, { recursive: true });
+    return;
+  }
+  if (await removeEmptyDirectory(lifecycleStateDir) && await pathExists(stateDir)) {
+    await fs.mkdir(locksPath, { recursive: true });
+  }
+}
+
+async function pathExists(targetPath) {
+  try {
+    await fs.access(targetPath);
+    return true;
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+async function removeEmptyDirectory(directory) {
+  try {
+    await fs.rmdir(directory);
+    return true;
+  } catch (error) {
+    if (error.code === 'ENOENT') return true;
+    if (['ENOTEMPTY', 'EEXIST'].includes(error.code)) return false;
+    throw error;
+  }
 }
 
 export async function withLock(stateDir, name, callback, options = {}) {
@@ -140,6 +184,13 @@ export async function withLock(stateDir, name, callback, options = {}) {
       await fs.writeFile(ownerPath, `${JSON.stringify({ version: 1, token, pid: process.pid, acquiredAt: now, heartbeatAt: now })}\n`, { flag: 'wx' });
       break;
     } catch (error) {
+      if (error.code === 'ENOENT') {
+        if (Date.now() - startedAt >= timeoutMs) {
+          throw new Error(`timed out waiting for state lock '${name}'`);
+        }
+        await fs.mkdir(path.dirname(lockPath), { recursive: true });
+        continue;
+      }
       if (error.code !== 'EEXIST') {
         throw error;
       }

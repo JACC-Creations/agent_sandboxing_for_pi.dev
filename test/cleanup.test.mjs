@@ -48,6 +48,14 @@ test('CLI cleanup requires the exact broker UUID and rejects all other arguments
     assert.equal(cleaned.brokerUuid, config.brokerUuid);
     assert.equal(cleaned.state, 'completed');
     await assert.rejects(fs.access(broker.stateDir), { code: 'ENOENT' });
+    await assert.rejects(fs.access(`${broker.stateDir}.lifecycle`), { code: 'ENOENT' });
+    await assert.doesNotReject(fs.access(broker.rootParent));
+
+    const repeated = JSON.parse((await run([
+      'cleanup', '--state-dir', broker.stateDir, '--broker-uuid', config.brokerUuid,
+    ])).stdout);
+    assert.equal(repeated.idempotent, true);
+    await assert.rejects(fs.access(`${broker.stateDir}.lifecycle`), { code: 'ENOENT' });
   } finally {
     await cleanup(broker);
   }
@@ -58,6 +66,7 @@ test('ProjFS cleanup lifecycle lock deterministically excludes new task and huma
   try {
     const cleaning = run(['cleanup', '--state-dir', broker.stateDir], {
       env: { AGENT_WORKSPACE_TEST_CLEANUP_AFTER_GENERATION_DELAY_MS: '500' },
+      timeout: 120000,
     });
     await waitForPath(`${broker.stateDir}.cleanup-journal.json`);
     const attempts = Promise.allSettled([
@@ -73,6 +82,7 @@ test('ProjFS cleanup lifecycle lock deterministically excludes new task and huma
     assert.match(startAttempt.reason.message, /cleanup is in progress|broker is not initialized|generation changed/);
     assert.equal(humanAttempt.status, 'rejected');
     assert.match(humanAttempt.reason.message, /broker is not initialized|ENOENT|generation changed/);
+    await assert.rejects(fs.access(`${broker.stateDir}.lifecycle`), { code: 'ENOENT' });
   } finally {
     await cleanup(broker);
   }
@@ -120,7 +130,9 @@ test('ProjFS cleanup fails closed when a live provider identity remains unquerya
       env: { AGENT_WORKSPACE_TEST_IDENTITY_UNAVAILABLE_PID: String(providerPid) },
     }), /identity is unknown-live/);
     assert.doesNotReject(fs.access(broker.stateDir));
+    await assert.doesNotReject(fs.access(`${broker.stateDir}.lifecycle`));
     await run(['cleanup', '--state-dir', broker.stateDir]);
+    await assert.rejects(fs.access(`${broker.stateDir}.lifecycle`), { code: 'ENOENT' });
   } finally {
     await cleanup(broker);
   }
@@ -171,9 +183,11 @@ test('ProjFS cleanup receipt cannot complete a reinitialized generation at the s
     ]);
     const secondConfig = JSON.parse(await fs.readFile(path.join(broker.stateDir, 'config.json'), 'utf8'));
     assert.notEqual(secondConfig.brokerUuid, firstConfig.brokerUuid);
+    await assert.doesNotReject(fs.access(`${broker.stateDir}.lifecycle`));
     const cleaned = JSON.parse((await run(['cleanup', '--state-dir', broker.stateDir])).stdout);
     assert.equal(cleaned.brokerUuid, secondConfig.brokerUuid);
     await assert.rejects(fs.access(broker.stateDir), { code: 'ENOENT' });
+    await assert.rejects(fs.access(`${broker.stateDir}.lifecycle`), { code: 'ENOENT' });
   } finally {
     await cleanup(broker);
   }

@@ -30,7 +30,7 @@ Install a reviewed local checkout directly, or install a pinned git ref:
 
 ```powershell
 pi install C:\path\to\agent-workspace
-pi install git:https://github.com/JACC-Creations/agent_sandboxing_for_pi.dev.git@v0.1.0
+pi install git:https://github.com/JACC-Creations/agent_sandboxing_for_pi.dev.git@v0.1.1
 ```
 
 The package manifest loads the typed extension and the `agent-workspace` skill together and installs the four win32-x64 native executables. `npm run test:package` verifies the exact executable allowlist, AMD64 PE identity, and every hash in `native/projfs-provider/bin/win32-x64/SHA256SUMS`.
