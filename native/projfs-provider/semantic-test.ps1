@@ -60,6 +60,12 @@ $process = $null
 try {
     New-Item -ItemType Directory -Path $lower, $root, $logs | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $lower 'nested') | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $lower '.Vs\UE\v17\ipch') | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $lower '.vs-other') | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $lower 'nested\.vs') | Out-Null
+    Set-Content -LiteralPath (Join-Path $lower '.Vs\UE\v17\ipch\mutable.ipch') -Value 'mutable cache' -NoNewline
+    Set-Content -LiteralPath (Join-Path $lower '.vs-other\visible.txt') -Value 'root prefix visible' -NoNewline
+    Set-Content -LiteralPath (Join-Path $lower 'nested\.vs\visible.txt') -Value 'nested cache visible' -NoNewline
     Set-Content -LiteralPath (Join-Path $lower 'MixedCase.native.verse') -Value 'mixed case' -NoNewline
     Set-Content -LiteralPath (Join-Path $lower 'read.txt') -Value 'lower read' -NoNewline
     Set-Content -LiteralPath (Join-Path $lower 'overwrite.txt') -Value 'lower overwrite' -NoNewline
@@ -72,6 +78,24 @@ try {
     }
 
     $process = Start-Provider $provider $lower $root $logs
+
+    $rootNames = @(Get-ChildItem -LiteralPath $root -Force | ForEach-Object Name)
+    Assert-True (-not ($rootNames -icontains '.vs')) 'Root .vs was enumerated.'
+    Assert-True ($rootNames -ccontains '.vs-other') 'A non-exact .vs-prefixed root name was excluded.'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $root '.VS\UE\v17\ipch\mutable.ipch'))) 'A case-insensitive direct .vs query succeeded.'
+    $directOpenFailed = $false
+    try {
+        [System.IO.File]::ReadAllText((Join-Path $root '.vS\UE\v17\ipch\mutable.ipch')) | Out-Null
+    }
+    catch {
+        $directOpenFailed = $true
+    }
+    Assert-True $directOpenFailed 'A direct .vs descendant open succeeded.'
+    Assert-True ((Get-Content (Join-Path $root '.vs-other\visible.txt') -Raw) -ceq 'root prefix visible') 'A non-exact root .vs prefix was excluded.'
+    Assert-True ((Get-Content (Join-Path $root 'nested\.vs\visible.txt') -Raw) -ceq 'nested cache visible') 'A nested non-root .vs directory was excluded.'
+    New-Item -ItemType Directory -Path (Join-Path $root '.vs') | Out-Null
+    Set-Content -LiteralPath (Join-Path $root '.vs\local-cache.txt') -Value 'private cache' -NoNewline
+    Assert-True ((Get-Content (Join-Path $root '.vs\local-cache.txt') -Raw) -ceq 'private cache') 'A private projected-root .vs cache could not be created.'
 
     Assert-True ((Get-Content (Join-Path $root 'MIXEDCASE.NATIVE.VERSE') -Raw) -ceq 'mixed case') 'Case-insensitive projected read failed.'
     $projectedCase = (Get-ChildItem -LiteralPath $root -File | Where-Object Name -IEq 'MixedCase.native.verse').Name
@@ -99,6 +123,7 @@ try {
     Assert-True (-not (Test-Path (Join-Path $root 'delete.txt'))) 'Delete tombstone did not persist after restart.'
     Assert-True ((Get-Content (Join-Path $root 'renamed.txt') -Raw) -ceq 'lower rename') 'Rename did not persist after restart.'
     Assert-True (-not (Test-Path (Join-Path $root 'rename.txt'))) 'Rename source returned after restart.'
+    Assert-True ((Get-Content (Join-Path $root '.vs\local-cache.txt') -Raw) -ceq 'private cache') 'Private projected-root .vs cache did not persist after restart.'
 
     $after = Get-ChildItem -LiteralPath $lower -File -Recurse | Sort-Object FullName | ForEach-Object {
         [pscustomobject]@{ Relative = $_.FullName.Substring($lower.Length); Hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash }

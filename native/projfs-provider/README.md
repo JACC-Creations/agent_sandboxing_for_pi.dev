@@ -1,6 +1,6 @@
 # Minimal ProjFS read-through provider
 
-A dependency-free Windows x64 spike that projects a read-only lower directory into a ProjFS virtualization root. Projected files are hydrated on demand; normal NTFS changes in the root (full files and tombstones) shadow the lower tree without modifying it.
+A dependency-free Windows x64 spike that projects a read-only lower directory into a ProjFS virtualization root. Projected files are hydrated on demand; normal NTFS changes in the root (full files and tombstones) shadow the lower tree without modifying it. In fresh roots, the lower's root `.vs` directory is a built-in case-insensitive exclusion: it and its descendants are never enumerated, queried, or hydrated, while nested `.vs` and names such as `.vs-other` remain visible. Roots previously used by a provider without this policy must be discarded rather than reused.
 
 ## Prerequisites
 
@@ -32,7 +32,7 @@ The first run marks a normal directory as a ProjFS virtualization root. Later ru
 
 ## Disposable semantic test
 
-The core test creates a unique temporary lower/root pair and retains it for inspection. It covers projected reads, overwrite, local create, delete, rename, crash-style provider restart persistence, and lower-tree immutability. The advanced test adds two-provider isolation, cross-volume roots, concurrent 100 MiB hydration, mapped writes, projected executable and child-process execution, native CMake/MSVC compilation, and graceful restart. Neither test enables the Windows feature.
+The core test creates a unique temporary lower/root pair and retains it for inspection. It covers projected reads, the root `.vs` enumeration and direct-open exclusion boundaries, overwrite, local create, delete, rename, crash-style provider restart persistence, and lower-tree immutability. The advanced test adds two-provider isolation, cross-volume roots, concurrent 100 MiB hydration, mapped writes, projected executable and child-process execution, native CMake/MSVC compilation, and graceful restart. Neither test enables the Windows feature.
 
 ```powershell
 .\semantic-test.ps1 -ProviderPath .\build\Release\projfs-provider.exe
@@ -50,7 +50,7 @@ The guard test creates a small `%TEMP%` lower, verifies outside-lower filtering,
 .\watcher-benchmark.ps1 -GuardPath .\build\Release\lower-freeze-guard.exe -IdleSeconds 10
 ```
 
-The guard registers one bounded asynchronous `ReadDirectoryChangesW` subtree request before readiness and latches durable action/path/time quarantine evidence on the first event. Detection is continuous-process only: any reboot, watcher gap/death, overflow, root identity/path change, or unverifiable condition quarantines retained roots. A broker restart is adoptable only while watcher continuity survives. `watcher-benchmark.ps1 -MainLower <path>` measures Main startup and idle use read-only while event latency is measured only on a separate disposable lower.
+The guard registers one bounded asynchronous `ReadDirectoryChangesW` subtree request before readiness and latches durable action/path/time quarantine evidence on the first nonignored event. Events under the lower's root `.vs` directory are ignored case-insensitively; this fixed exclusion does not apply to nested `.vs` or names such as `.vs-other`. Every record in each completed notification buffer is validated, and the alternate buffer is armed before an ignored-only batch is accepted. Detection is continuous-process only: any reboot, watcher gap/death, overflow, malformed notification, root identity/path change, or unverifiable condition quarantines retained roots. A broker restart is adoptable only while watcher continuity survives. `watcher-benchmark.ps1 -MainLower <path>` measures Main startup and idle use read-only while event latency is measured only on a separate disposable lower.
 
 ## Supervised UBT probes
 

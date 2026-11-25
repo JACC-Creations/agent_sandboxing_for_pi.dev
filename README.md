@@ -30,7 +30,7 @@ Install a reviewed local checkout directly, or install a pinned git ref:
 
 ```powershell
 pi install C:\path\to\agent-workspace
-pi install git:https://github.com/JACC-Creations/agent_sandboxing_for_pi.dev.git@v0.1.1
+pi install git:https://github.com/JACC-Creations/agent_sandboxing_for_pi.dev.git@v0.1.2
 ```
 
 The package manifest loads the typed extension and the `agent-workspace` skill together and installs the four win32-x64 native executables. `npm run test:package` verifies the exact executable allowlist, AMD64 PE identity, and every hash in `native/projfs-provider/bin/win32-x64/SHA256SUMS`.
@@ -126,7 +126,7 @@ The P4 backend is optional and available only with ProjFS. Initialization verifi
 
 Initialization exclusively creates each projected root and records broker UUID, root nonce, and process ownership. Native launch supervision creates process jobs before child execution, publishes ownership durably, and only then resumes the child. Cancellation, recovery, quarantine, and cleanup act on matching ownership and process identities rather than image names.
 
-The lower watcher registers one recursive asynchronous directory notification before reporting readiness. A lower mutation, watcher death, stale heartbeat, notification overflow, malformed event, root identity/path change, reboot, or any monitoring gap quarantines the generation. Quarantine blocks new work, cancels queued/running tasks, and stops all providers, including idle human slots. Retained roots are not reused after continuity is lost; create a new generation.
+The lower watcher registers one recursive asynchronous directory notification before reporting readiness. For generations created by `v0.1.2` or later, the lower root's non-authoritative `.vs` cache is a fixed case-insensitive exception: providers do not project it, and its mutations do not quarantine the generation. This exception applies only to the exact root component, not nested `.vs` directories or names such as `.vs-other`; it is not configurable. Clean up generations created by earlier package versions before upgrading so previously materialized `.vs` placeholders cannot be reused. Any other lower mutation, watcher death, stale heartbeat, notification overflow, malformed event, root identity/path change, reboot, or monitoring gap quarantines the generation. Quarantine blocks new work, cancels queued/running tasks, and stops all providers, including idle human slots. Retained roots are not reused after continuity is lost; create a new generation.
 
 The generation supervisor runs independently from CLI and task monitors. It continuously checks watcher ownership, heartbeat, and quarantine state, then enforces generation-wide cancellation and provider shutdown.
 

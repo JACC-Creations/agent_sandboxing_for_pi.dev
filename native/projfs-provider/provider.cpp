@@ -172,6 +172,10 @@ private:
 		{
 			return HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED);
 		}
+		if (Owner.IsExcludedRelativePath(CallbackData->FilePathName))
+		{
+			return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+		}
 
 		std::lock_guard Lock(Owner.EnumerationMutex);
 		EnumerationState State;
@@ -294,6 +298,10 @@ private:
 	{
 		Provider& Owner = FromCallback(CallbackData);
 		CommandScope Command(Owner, CallbackData->CommandId);
+		if (Owner.IsExcludedRelativePath(CallbackData->FilePathName))
+		{
+			return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+		}
 		if (Length == 0)
 		{
 			return S_OK;
@@ -459,6 +467,10 @@ private:
 			{
 				continue;
 			}
+			if (RelativePath.empty() && IsExcludedRelativePath(FindData.cFileName))
+			{
+				continue;
+			}
 			if (!PrjFileNameMatch(FindData.cFileName, SearchExpression.c_str()))
 			{
 				continue;
@@ -499,6 +511,10 @@ private:
 		if (!IsSafeRelativePath(RelativePath))
 		{
 			return HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED);
+		}
+		if (IsExcludedRelativePath(RelativePath))
+		{
+			return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
 		}
 
 		const std::wstring FullPath = MakeLowerPath(RelativePath);
@@ -578,6 +594,15 @@ private:
 		}
 		RelativePath = FinalPath.substr(LowerFinalPath.size() + 1);
 		return S_OK;
+	}
+
+	static bool IsExcludedRelativePath(PCWSTR RelativePath)
+	{
+		if (RelativePath == nullptr || _wcsnicmp(RelativePath, L".vs", 3) != 0)
+		{
+			return false;
+		}
+		return RelativePath[3] == L'\0' || RelativePath[3] == L'\\' || RelativePath[3] == L'/';
 	}
 
 	bool IsSafeRelativePath(PCWSTR RelativePath) const

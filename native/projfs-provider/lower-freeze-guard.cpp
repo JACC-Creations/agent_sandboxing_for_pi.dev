@@ -11,6 +11,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <utility>
 
 namespace
 {
@@ -47,6 +48,66 @@ namespace
 		}
 	};
 	using FUniqueHandle = std::unique_ptr<void, FHandleCloser>;
+
+	class FDirectoryChangeRead
+	{
+	public:
+		FDirectoryChangeRead(HANDLE InDirectory, HANDLE InEvent)
+			: Directory(InDirectory), Event(InEvent)
+		{
+		}
+
+		~FDirectoryChangeRead()
+		{
+			Settle();
+		}
+
+		bool Arm(void* Buffer, const DWORD BufferByteCount)
+		{
+			if (bPending || ResetEvent(Event) == FALSE)
+			{
+				return false;
+			}
+			Overlapped = {};
+			Overlapped.hEvent = Event;
+			if (ReadDirectoryChangesW(Directory, Buffer, BufferByteCount, TRUE,
+				ChangeFilter, nullptr, &Overlapped, nullptr) == FALSE)
+			{
+				return false;
+			}
+			bPending = true;
+			return true;
+		}
+
+		bool Complete(DWORD& Bytes)
+		{
+			if (!bPending)
+			{
+				return false;
+			}
+			const bool bCompleted = GetOverlappedResult(Directory, &Overlapped, &Bytes, FALSE) != FALSE;
+			bPending = false;
+			return bCompleted;
+		}
+
+	private:
+		void Settle()
+		{
+			if (!bPending)
+			{
+				return;
+			}
+			CancelIoEx(Directory, &Overlapped);
+			DWORD Bytes = 0;
+			GetOverlappedResult(Directory, &Overlapped, &Bytes, TRUE);
+			bPending = false;
+		}
+
+		HANDLE Directory = INVALID_HANDLE_VALUE;
+		HANDLE Event = nullptr;
+		OVERLAPPED Overlapped{};
+		bool bPending = false;
+	};
 
 	std::string Utf8(const std::wstring& Value)
 	{
@@ -253,8 +314,17 @@ namespace
 		return Error ? std::nullopt : std::optional<FOptions>(Options);
 	}
 
-	bool ParseFirstEvent(const std::array<std::byte, BufferSize>& Buffer, const DWORD Bytes,
-		std::wstring& Action, std::wstring& RelativePath)
+	bool IsExcludedRelativePath(const std::wstring& RelativePath)
+	{
+		if (RelativePath.size() < 3 || _wcsnicmp(RelativePath.c_str(), L".vs", 3) != 0)
+		{
+			return false;
+		}
+		return RelativePath.size() == 3 || RelativePath[3] == L'\\' || RelativePath[3] == L'/';
+	}
+
+	bool ParseEvents(const std::array<std::byte, BufferSize>& Buffer, const DWORD Bytes,
+		std::wstring& FirstAction, std::wstring& FirstRelativePath)
 	{
 		if (Bytes == 0)
 		{
@@ -278,17 +348,23 @@ namespace
 			{
 				return false;
 			}
-			Action = ActionName(Information->Action);
-			RelativePath.assign(Information->FileName, Information->FileNameLength / sizeof(wchar_t));
+			std::wstring RelativePath(Information->FileName, Information->FileNameLength / sizeof(wchar_t));
 			if (RelativePath.empty())
 			{
 				return false;
+			}
+			if (FirstRelativePath.empty() && !IsExcludedRelativePath(RelativePath))
+			{
+				FirstAction = ActionName(Information->Action);
+				FirstRelativePath = std::move(RelativePath);
 			}
 			if (Information->NextEntryOffset == 0)
 			{
 				return true;
 			}
-			if ((Information->NextEntryOffset % sizeof(DWORD)) != 0 || Information->NextEntryOffset > Bytes - Offset)
+			const DWORD RecordSize = HeaderSize + Information->FileNameLength;
+			if ((Information->NextEntryOffset % sizeof(DWORD)) != 0
+				|| Information->NextEntryOffset < RecordSize || Information->NextEntryOffset >= Bytes - Offset)
 			{
 				return false;
 			}
@@ -320,23 +396,21 @@ int wmain(const int ArgumentCount, wchar_t** Arguments)
 		std::cerr << "could not establish lower root identity\n";
 		return 3;
 	}
-	std::array<std::byte, BufferSize> Buffer{};
+	alignas(DWORD) std::array<std::array<std::byte, BufferSize>, 2> Buffers{};
+	std::size_t ActiveBuffer = 0;
 	FUniqueHandle Event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
 	if (Event.get() == nullptr)
 	{
 		return 3;
 	}
-	OVERLAPPED Overlapped{};
-	Overlapped.hEvent = Event.get();
-	if (ReadDirectoryChangesW(Directory.get(), Buffer.data(), static_cast<DWORD>(Buffer.size()), TRUE,
-		ChangeFilter, nullptr, &Overlapped, nullptr) == FALSE)
+	FDirectoryChangeRead Watch(Directory.get(), Event.get());
+	if (!Watch.Arm(Buffers[ActiveBuffer].data(), static_cast<DWORD>(Buffers[ActiveBuffer].size())))
 	{
 		Quarantine(Options, *Identity, "watch registration failed", L"watcher_error", L"");
 		return 4;
 	}
 	if (!AtomicWrite(Options.State, StateJson(Options, *Identity, "ready")))
 	{
-		CancelIoEx(Directory.get(), &Overlapped);
 		return 4;
 	}
 	std::cout << "LOWER_FREEZE_READY" << std::endl;
@@ -368,7 +442,7 @@ int wmain(const int ArgumentCount, wchar_t** Arguments)
 			return Quarantine(Options, *Identity, "watch wait failed", L"watcher_error", L"") ? 5 : 6;
 		}
 		DWORD Bytes = 0;
-		if (GetOverlappedResult(Directory.get(), &Overlapped, &Bytes, FALSE) == FALSE)
+		if (!Watch.Complete(Bytes))
 		{
 			return Quarantine(Options, *Identity, "directory watcher failed", L"watcher_error", L"") ? 5 : 6;
 		}
@@ -376,12 +450,27 @@ int wmain(const int ArgumentCount, wchar_t** Arguments)
 		{
 			return Quarantine(Options, *Identity, "directory notification buffer overflow", L"buffer_overflow", L"") ? 5 : 6;
 		}
+
+		const std::size_t CompletedBuffer = ActiveBuffer;
+		ActiveBuffer = 1 - ActiveBuffer;
+		if (!Watch.Arm(Buffers[ActiveBuffer].data(), static_cast<DWORD>(Buffers[ActiveBuffer].size())))
+		{
+			return Quarantine(Options, *Identity, "watch re-registration failed", L"watcher_error", L"") ? 5 : 6;
+		}
+
 		std::wstring Action;
 		std::wstring RelativePath;
-		if (!ParseFirstEvent(Buffer, Bytes, Action, RelativePath))
+		if (!ParseEvents(Buffers[CompletedBuffer], Bytes, Action, RelativePath))
 		{
 			return Quarantine(Options, *Identity, "malformed directory notification", L"malformed_event", L"") ? 5 : 6;
 		}
-		return Quarantine(Options, *Identity, "sealed lower changed", Action, RelativePath) ? 5 : 6;
+		if (!RelativePath.empty())
+		{
+			return Quarantine(Options, *Identity, "sealed lower changed", Action, RelativePath) ? 5 : 6;
+		}
+		if (!IdentityMatches(Directory.get(), *Identity))
+		{
+			return Quarantine(Options, *Identity, "lower root identity or path changed", L"root_identity_change", L"") ? 5 : 6;
+		}
 	}
 }

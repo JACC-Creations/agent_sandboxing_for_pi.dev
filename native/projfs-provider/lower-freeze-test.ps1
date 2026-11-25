@@ -49,6 +49,7 @@ function Wait-Quarantine($watch, [string]$expectedAction, [string]$expectedName 
 $processes = @()
 try {
     Set-Content -LiteralPath (Join-Path $lower 'edit.txt') -Value 'baseline'
+    New-Item -ItemType Directory -Path (Join-Path $lower '.Vs\UE\v17\ipch') | Out-Null
     $outside = Start-Watcher 'outside'
     $processes += $outside.Process
     Set-Content -LiteralPath (Join-Path $testRoot 'outside-lower.txt') -Value 'outside'
@@ -57,6 +58,31 @@ try {
     if ($outside.Process.HasExited -or (Test-Path $outside.Quarantine)) { throw 'outside-lower event was not ignored' }
     Stop-Process -Id $outside.Process.Id
     $outside.Process.WaitForExit(10000) | Out-Null
+
+    $vsIgnore = Start-Watcher 'vs-ignore'; $processes += $vsIgnore.Process
+    Set-Content -LiteralPath (Join-Path $lower '.Vs\UE\v17\ipch\mutable.ipch') -Value 'cache write'
+    Add-Content -LiteralPath (Join-Path $lower '.Vs\UE\v17\ipch\mutable.ipch') -Value 'cache rewrite'
+    Start-Sleep -Milliseconds 500
+    $vsIgnore.Process.Refresh()
+    if ($vsIgnore.Process.HasExited -or (Test-Path $vsIgnore.Quarantine)) { throw 'root .vs mutation was not ignored' }
+    Set-Content -LiteralPath (Join-Path $lower 'source-after-vs.txt') -Value 'source mutation'
+    Wait-Quarantine $vsIgnore 'added' 'source-after-vs.txt'
+
+    $vsPrefix = Start-Watcher 'vs-prefix'; $processes += $vsPrefix.Process
+    New-Item -ItemType Directory -Path (Join-Path $lower '.vs-other') | Out-Null
+    Wait-Quarantine $vsPrefix 'added' '.vs-other'
+
+    New-Item -ItemType Directory -Path (Join-Path $lower 'nested') | Out-Null
+    $nestedVs = Start-Watcher 'nested-vs'; $processes += $nestedVs.Process
+    New-Item -ItemType Directory -Path (Join-Path $lower 'nested\.vs') | Out-Null
+    Wait-Quarantine $nestedVs 'added' 'nested\.vs'
+
+    for ($index = 0; $index -lt 8; ++$index) {
+        $burst = Start-Watcher "burst-$index"; $processes += $burst.Process
+        Set-Content -LiteralPath (Join-Path $lower ".Vs\UE\v17\ipch\burst-$index.ipch") -Value 'cache burst'
+        Set-Content -LiteralPath (Join-Path $lower "protected-burst-$index.txt") -Value 'protected burst'
+        Wait-Quarantine $burst 'added' "protected-burst-$index.txt"
+    }
 
     $edit = Start-Watcher 'edit'; $processes += $edit.Process
     Add-Content -LiteralPath (Join-Path $lower 'edit.txt') -Value 'changed'
@@ -86,6 +112,10 @@ try {
         lower = $lower
         events = @('edit', 'create', 'delete', 'rename')
         outsideLowerIgnored = $true
+        rootVsIgnored = $true
+        postIgnoreSourceMutationDetected = $true
+        nonExactVsNamesDetected = $true
+        ignoredBurstContinuityIterations = 8
         overflowFailsClosed = $true
         watcherErrorFailsClosed = $true
     } | ConvertTo-Json -Depth 4
