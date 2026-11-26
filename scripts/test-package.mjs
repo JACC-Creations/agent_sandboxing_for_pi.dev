@@ -42,6 +42,7 @@ const requiredFiles = new Set([
   "src/generation-supervisor.mjs",
   "src/internal-api.mjs",
   "src/ownership.mjs",
+  "src/perforce-reconnect.mjs",
   "src/perforce-state.mjs",
   "src/perforce.mjs",
   "src/process-identity.mjs",

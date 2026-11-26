@@ -420,9 +420,13 @@ export async function stopOwnedGenerationSupervisor(stateDir, config) {
 export async function ensureProvider(stateDir, config, taskId) {
   if (config.adapter !== 'projfs') return null;
   await requireProjfsSafe(stateDir, config);
-  const reservation = await withLifecycleLock(stateDir, async () => {
-    await assertBrokerGeneration(stateDir, config.brokerUuid);
-    const value = await withLock(stateDir, 'state', async () => {
+  const reservation = await withLifecycleLock(stateDir, () => reserveAndLaunchProvider(stateDir, config, taskId));
+  return finishProviderStartup(stateDir, config, taskId, reservation);
+}
+
+async function reserveAndLaunchProvider(stateDir, config, taskId) {
+  await assertBrokerGeneration(stateDir, config.brokerUuid);
+  const value = await withLock(stateDir, 'state', async () => {
     const paths = statePaths(stateDir);
     const slots = await readJson(paths.slots);
     const slot = slots.slots.find((candidate) => candidate.taskId === taskId);
@@ -453,16 +457,21 @@ export async function ensureProvider(stateDir, config, taskId) {
     slots.updatedAt = slot.provider.startedAt;
     await atomicWriteJson(paths.slots, slots);
     return { mode: 'launch', slot: structuredClone(slot) };
-    });
-    if (value.mode === 'launch') {
-      const lifecycleDelayMs = Number(process.env.AGENT_WORKSPACE_TEST_PROVIDER_LIFECYCLE_DELAY_MS ?? 0);
-      if (Number.isSafeInteger(lifecycleDelayMs) && lifecycleDelayMs > 0) await delay(lifecycleDelayMs);
-      await assertBrokerGeneration(stateDir, config.brokerUuid);
-      await launchReservedProvider(stateDir, config, value.slot);
-    }
-    return value;
   });
+  if (value.mode === 'launch') {
+    const lifecycleGate = process.env.AGENT_WORKSPACE_TEST_PROVIDER_LIFECYCLE_GATE;
+    if (lifecycleGate) {
+      while (!await fs.access(lifecycleGate).then(() => true, () => false)) await delay(20);
+    }
+    const lifecycleDelayMs = Number(process.env.AGENT_WORKSPACE_TEST_PROVIDER_LIFECYCLE_DELAY_MS ?? 0);
+    if (Number.isSafeInteger(lifecycleDelayMs) && lifecycleDelayMs > 0) await delay(lifecycleDelayMs);
+    await assertBrokerGeneration(stateDir, config.brokerUuid);
+    await launchReservedProvider(stateDir, config, value.slot);
+  }
+  return value;
+}
 
+async function finishProviderStartup(stateDir, config, taskId, reservation) {
   if (reservation.mode === 'ready') {
     if (await providerIdentityMatches(reservation.slot.provider)) return reservation.slot.provider;
     await quarantineProvider(stateDir, reservation.slot.index, 'retained ProjFS provider identity is no longer live');
@@ -668,38 +677,42 @@ export async function createHumanSlot(stateDir, config, name) {
   }
   await requireProjfsSafe(stateDir, config);
   const ownerId = `human:${name}`;
-  const slot = await withLifecycleLock(stateDir, async () => {
+  return withLifecycleLock(stateDir, async () => {
     await assertBrokerGeneration(stateDir, config.brokerUuid);
-    return withLock(stateDir, 'state', async () => {
-    const paths = statePaths(stateDir);
-    const slots = await readJson(paths.slots);
-    if (slots.slots.some((candidate) => candidate.humanOwner === name)) throw new Error(`human slot '${name}' is already retained`);
-    const selected = slots.slots.find((candidate) => !candidate.taskId && !candidate.humanOwner);
-    if (!selected) throw new Error(`capacity exhausted: all ${config.maxAgentWorkspaces} projected slots are retained`);
-    selected.taskId = ownerId;
-    selected.humanOwner = name;
-    selected.humanOwnerState = 'provisioning';
-    selected.allocatedAt = new Date().toISOString();
-    slots.updatedAt = selected.allocatedAt;
-    await atomicWriteJson(paths.slots, slots);
-    return structuredClone(selected);
+    const slot = await withLock(stateDir, 'state', async () => {
+      const paths = statePaths(stateDir);
+      const slots = await readJson(paths.slots);
+      if (slots.slots.some((candidate) => candidate.humanOwner === name)) throw new Error(`human slot '${name}' is already retained`);
+      const selected = slots.slots.find((candidate) => !candidate.taskId && !candidate.humanOwner);
+      if (!selected) throw new Error(`capacity exhausted: all ${config.maxAgentWorkspaces} projected slots are retained`);
+      selected.taskId = ownerId;
+      selected.humanOwner = name;
+      selected.humanOwnerState = 'provisioning';
+      selected.allocatedAt = new Date().toISOString();
+      slots.updatedAt = selected.allocatedAt;
+      await atomicWriteJson(paths.slots, slots);
+      return structuredClone(selected);
     });
+    try {
+      const reservation = await reserveAndLaunchProvider(stateDir, config, ownerId);
+      const provider = await finishProviderStartup(stateDir, config, ownerId, reservation);
+      await setHumanOwnerState(stateDir, config.brokerUuid, slot.index, name, 'ready');
+      return { name, slot: slot.index, root: slot.root, humanOwnerState: 'ready', provider };
+    } catch (error) {
+      await setHumanOwnerState(stateDir, config.brokerUuid, slot.index, name, 'quarantined', error.message);
+      throw error;
+    }
   });
-  try {
-    const provider = await ensureProvider(stateDir, config, ownerId);
-    await setHumanOwnerState(stateDir, slot.index, 'ready');
-    return { name, slot: slot.index, root: slot.root, humanOwnerState: 'ready', provider };
-  } catch (error) {
-    await setHumanOwnerState(stateDir, slot.index, 'quarantined', error.message);
-    throw error;
-  }
 }
 
-async function setHumanOwnerState(stateDir, slotIndex, state, error = null) {
+async function setHumanOwnerState(stateDir, brokerUuid, slotIndex, humanOwner, state, error = null) {
+  await assertBrokerGeneration(stateDir, brokerUuid);
   await withLock(stateDir, 'state', async () => {
     const paths = statePaths(stateDir);
     const slots = await readJson(paths.slots);
+    if (slots.brokerUuid !== brokerUuid) throw new Error('human slot generation changed before finalization');
     const slot = slots.slots.find((candidate) => candidate.index === slotIndex);
+    if (!slot || slot.humanOwner !== humanOwner) throw new Error('human slot reservation changed before finalization');
     slot.humanOwnerState = state;
     slot.humanOwnerError = error;
     slots.updatedAt = new Date().toISOString();

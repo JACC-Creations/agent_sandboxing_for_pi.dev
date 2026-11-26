@@ -2,13 +2,18 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createP4, deleteReviewDisposalResource, inspectReviewDisposal, readP4ServerBinding } from './perforce.mjs';
+import {
+  createControlledP4,
+  discoverControlledP4Profile,
+  resolveP4Executable,
+  validateReconnectProfile as validateSharedReconnectProfile,
+  verifyControlledEndpoint,
+} from './perforce-reconnect.mjs';
 import { atomicWriteJson, readJsonIfPresent, validateTaskId, withLifecycleLock } from './state.mjs';
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const noncePattern = /^[0-9a-f]{32}$/;
-const sha256Pattern = /^[0-9a-f]{64}$/;
 const phases = ['shelf', 'change', 'client'];
-const ambientSettingLimits = Object.freeze({ P4PORT: 1024, P4CHARSET: 128, P4TICKETS: 32_768, P4TRUST: 32_768 });
 
 export class ReviewDisposalError extends Error {
   constructor(code) {
@@ -91,22 +96,11 @@ function validateRemovedResources(receipt) {
 }
 
 function validateReconnectProfile(profile, errorCode = 'invalid_receipt') {
-  const permitted = new Set([
-    'version', 'executable', 'port', 'user', 'charset', 'ticketFile', 'trustFile',
-    'serverFingerprint', 'testMode', 'fakeScript', 'fakeRegistry',
-  ]);
-  if (!profile || Array.isArray(profile) || profile.version !== 1
-    || Object.keys(profile).some((key) => !permitted.has(key))
-    || !path.isAbsolute(profile.executable ?? '') || !requireText(profile.port) || !requireText(profile.user)
-    || !sha256Pattern.test(profile.serverFingerprint ?? '')) refuse(errorCode);
-  for (const name of ['charset']) if (profile[name] !== undefined && !requireText(profile[name])) refuse(errorCode);
-  for (const name of ['ticketFile', 'trustFile']) {
-    if (profile[name] !== undefined && (!requireText(profile[name]) || !path.isAbsolute(profile[name]))) refuse(errorCode);
+  try {
+    return validateSharedReconnectProfile(profile);
+  } catch {
+    refuse(errorCode);
   }
-  if (profile.testMode === true) {
-    if (!path.isAbsolute(profile.fakeScript ?? '') || !path.isAbsolute(profile.fakeRegistry ?? '')) refuse(errorCode);
-  } else if (profile.testMode !== undefined || profile.fakeScript !== undefined || profile.fakeRegistry !== undefined) refuse(errorCode);
-  return structuredClone(profile);
 }
 
 function validateReceipt(receipt, stateDir, expectedBrokerUuid, taskId) {
@@ -157,91 +151,30 @@ async function inspect(p4, resources) {
 }
 
 async function verifyEndpoint(p4, profile) {
-  let live;
   try {
-    live = await readP4ServerBinding(p4);
+    await verifyControlledEndpoint(p4, profile);
   } catch {
     refuse('endpoint_verification_failed');
   }
-  if (live.user !== profile.user || live.fingerprint !== profile.serverFingerprint) refuse('endpoint_verification_failed');
 }
 
 function createProfileP4(profile, internals) {
   if (internals.createBoundP4) return internals.createBoundP4(structuredClone(profile));
-  return createP4({
-    executable: profile.executable,
-    P4PORT: profile.port,
-    P4USER: profile.user,
-    P4CHARSET: profile.charset,
-    ticketFile: profile.ticketFile,
-    trustFile: profile.trustFile,
-    controlledEnvironment: true,
-    ...(profile.testMode ? {
-      testMode: true,
-      fakeScript: profile.fakeScript,
-      env: { FAKE_P4_REGISTRY: profile.fakeRegistry },
-    } : {}),
-  });
-}
-
-async function resolveAmbientExecutable() {
-  const executable = process.env.P4EXE ?? (process.platform === 'win32' ? 'p4.exe' : 'p4');
-  const extensions = process.platform === 'win32' && !path.extname(executable)
-    ? (process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)
-    : [''];
-  const candidates = path.isAbsolute(executable) || /[\\/]/.test(executable)
-    ? [path.resolve(executable)]
-    : String(process.env.PATH ?? '').split(path.delimiter).filter(Boolean)
-      .flatMap((directory) => extensions.map((extension) => path.resolve(directory, `${executable}${extension}`)));
-  for (const candidate of candidates) {
-    if (await fs.stat(candidate).then((stats) => stats.isFile(), () => false)) return candidate;
-  }
-  refuse('p4_executable_unavailable');
-}
-
-function validAmbientSetting(value, name) {
-  return typeof value === 'string' && value.length > 0
-    && Buffer.byteLength(value, 'utf8') <= ambientSettingLimits[name]
-    && !/[\0-\x1f\x7f]/.test(value);
-}
-
-async function readAmbientSetting(p4, name) {
-  const explicit = process.env[name];
-  if (validAmbientSetting(explicit, name)) return explicit;
-  let result;
-  try {
-    result = await p4.run(['set', '-q', name], { maxOutputBytes: 1024 });
-  } catch {
-    refuse('endpoint_verification_failed');
-  }
-  if (result.records.length !== 0) refuse('endpoint_verification_failed');
-  const output = result.stdout.trim();
-  if (output.length === 0) return undefined;
-  const prefix = `${name}=`;
-  if (!output.startsWith(prefix) || output.includes('\n')) refuse('endpoint_verification_failed');
-  const value = output.slice(prefix.length);
-  if (!validAmbientSetting(value, name)) refuse('endpoint_verification_failed');
-  return value;
-}
-
-async function resolveAmbientReconnectSettings(p4) {
-  const port = await readAmbientSetting(p4, 'P4PORT');
-  if (port === undefined) refuse('endpoint_verification_failed');
-  const charset = await readAmbientSetting(p4, 'P4CHARSET');
-  const tickets = await readAmbientSetting(p4, 'P4TICKETS');
-  const trust = await readAmbientSetting(p4, 'P4TRUST');
-  return {
-    port,
-    ...(charset === undefined ? {} : { charset }),
-    ...(tickets === undefined ? {} : { ticketFile: path.resolve(tickets) }),
-    ...(trust === undefined ? {} : { trustFile: path.resolve(trust) }),
-  };
+  return createControlledP4(profile);
 }
 
 async function adoptLegacy(binding, adoptionPath, internals) {
+  let executable = null;
+  if (!internals.createAmbientP4 || !internals.legacyProfile) {
+    try {
+      executable = await resolveP4Executable(process.env.P4EXE ?? (process.platform === 'win32' ? 'p4.exe' : 'p4'));
+    } catch {
+      refuse('p4_executable_unavailable');
+    }
+  }
   const ambientP4 = internals.createAmbientP4
     ? internals.createAmbientP4()
-    : createP4({ executable: await resolveAmbientExecutable(), preserveAmbientCredentials: true });
+    : createP4({ executable, preserveAmbientCredentials: true });
   const live = await inspect(ambientP4, binding.resources);
   if (!live.client || !live.change || !live.shelf) refuse('live_verification_failed');
   let endpoint;
@@ -251,17 +184,26 @@ async function adoptLegacy(binding, adoptionPath, internals) {
     refuse('endpoint_verification_failed');
   }
   if (endpoint.user !== binding.resources[0].user) refuse('endpoint_verification_failed');
-  const profile = internals.legacyProfile
-    ? validateReconnectProfile(internals.legacyProfile, 'endpoint_verification_failed')
-    : {
-      version: 1,
-      executable: await resolveAmbientExecutable(),
-      ...await resolveAmbientReconnectSettings(ambientP4),
-      user: endpoint.user,
-      serverFingerprint: endpoint.fingerprint,
-    };
-  validateReconnectProfile(profile, 'endpoint_verification_failed');
-  if (profile.user !== endpoint.user || profile.serverFingerprint !== endpoint.fingerprint) refuse('endpoint_verification_failed');
+  let profile;
+  if (internals.legacyProfile) {
+    profile = validateReconnectProfile(internals.legacyProfile, 'endpoint_verification_failed');
+    if (profile.user !== endpoint.user || profile.serverFingerprint !== endpoint.fingerprint) refuse('endpoint_verification_failed');
+  } else {
+    try {
+      const discovered = await discoverControlledP4Profile({
+        executable,
+        ambientP4,
+        knownBinding: endpoint,
+        expectedUser: endpoint.user,
+        expectedFingerprint: endpoint.fingerprint,
+        allowInvalidEnvironmentFallback: true,
+        controlledP4Factory: internals.createBoundP4,
+      });
+      profile = discovered.profile;
+    } catch {
+      refuse('endpoint_verification_failed');
+    }
+  }
 
   const controlledP4 = createProfileP4(profile, internals);
   await verifyEndpoint(controlledP4, profile);

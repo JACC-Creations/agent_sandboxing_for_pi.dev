@@ -1,6 +1,6 @@
 {
   "name": "agent-workspace",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Durable retained ProjFS workspaces for parallel build agents",
   "repository": {
     "type": "git",
@@ -53,7 +53,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --test --test-concurrency=5 --test-timeout=300000 test/perforce-lifecycle.test.mjs test/cleanup.test.mjs test/perforce-cleanup.test.mjs test/scheduler-heavy.test.mjs test/watcher-supervisor.test.mjs test/provider.test.mjs test/core-lifecycle.test.mjs test/perforce-provisioning.test.mjs test/scheduler.test.mjs test/unit-state-auth.test.mjs && npm run test:leaks",
+    "test": "node --test --test-concurrency=5 --test-timeout=300000 test/perforce-endpoint.test.mjs test/perforce-lifecycle.test.mjs test/cleanup.test.mjs test/perforce-cleanup.test.mjs test/scheduler-heavy.test.mjs test/watcher-supervisor.test.mjs test/provider.test.mjs test/core-lifecycle.test.mjs test/perforce-provisioning.test.mjs test/scheduler.test.mjs test/unit-state-auth.test.mjs && npm run test:leaks",
     "test:perforce": "node --test --test-concurrency=2 --test-timeout=300000 test/perforce-shelf.test.mjs test/perforce.test.mjs && npm run test:leaks",
     "test:handoff": "node --test --test-concurrency=1 --test-timeout=300000 test/perforce-handoff-metadata.test.mjs test/perforce-handoff.test.mjs && npm run test:leaks",
     "test:disposal": "node --test --test-concurrency=1 --test-timeout=300000 test/perforce-disposal.test.mjs && npm run test:leaks",

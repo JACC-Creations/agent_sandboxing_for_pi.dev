@@ -380,48 +380,81 @@ test('Pi routine P4 tools require identity but not UI and stop before mutation w
   }
 });
 
-test('Pi cleanup tool requires interactive approval and honors it', async (t) => {
+test('Pi cleanup is autonomous without human slots and requires approval with human slots', async (t) => {
   const tools = await loadExtensionTools(t);
   if (!tools) return;
-  const context = await setup(1);
+  const tool = tools.find((candidate) => candidate.name === 'agent_workspace_cleanup');
+  assert.ok(tool);
+  assert.deepEqual(tool.annotations, {
+    readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true,
+  });
+
+  const autonomous = await setup(1);
   try {
-    await run(context.initArgs, { timeout: 20000 });
-    const brokerUuid = (await inspectAgentWorkspace(context.stateDir)).brokerUuid;
-    const tool = tools.find((candidate) => candidate.name === 'agent_workspace_cleanup');
-    assert.ok(tool);
-    assert.deepEqual(tool.annotations, {
-      readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true,
-    });
-    const params = { stateDir: context.stateDir, brokerUuid };
+    await run(autonomous.initArgs, { timeout: 20000 });
+    const brokerUuid = (await inspectAgentWorkspace(autonomous.stateDir)).brokerUuid;
     let confirmCalls = 0;
-    const noUi = await tool.execute('cleanup-no-ui', params, undefined, undefined, {
+    const cleaned = await tool.execute('cleanup-no-human', {
+      stateDir: autonomous.stateDir, brokerUuid,
+    }, undefined, undefined, {
+      hasUI: false,
+      ui: { confirm: async () => { confirmCalls += 1; return true; } },
+    });
+    assert.equal(cleaned.isError, undefined);
+    assert.equal(confirmCalls, 0);
+    await assert.rejects(fs.access(autonomous.stateDir), { code: 'ENOENT' });
+    const repeated = await tool.execute('cleanup-completed', {
+      stateDir: autonomous.stateDir, brokerUuid,
+    }, undefined, undefined, {
+      hasUI: false,
+      ui: { confirm: async () => { confirmCalls += 1; return true; } },
+    });
+    assert.equal(repeated.isError, undefined);
+    assert.equal(repeated.details.result.idempotent, true);
+    assert.equal(confirmCalls, 0);
+  } finally {
+    await dispose(autonomous);
+  }
+
+  const human = await setup(1);
+  try {
+    await run(human.initArgs, { timeout: 20000 });
+    const slotsPath = path.join(human.stateDir, 'slots.json');
+    const slots = await readJson(slotsPath);
+    slots.slots[0].humanOwner = { ownerUuid: crypto.randomUUID() };
+    slots.slots[0].humanOwnerState = 'ready';
+    await fs.writeFile(slotsPath, `${JSON.stringify(slots, null, 2)}\n`);
+    const brokerUuid = (await inspectAgentWorkspace(human.stateDir)).brokerUuid;
+    const params = { stateDir: human.stateDir, brokerUuid };
+    let confirmCalls = 0;
+    const noUi = await tool.execute('cleanup-human-no-ui', params, undefined, undefined, {
       hasUI: false,
       ui: { confirm: async () => { confirmCalls += 1; return true; } },
     });
     assert.equal(noUi.isError, true);
     assert.equal(noUi.details.error.code, 'approval_required');
     assert.equal(confirmCalls, 0);
-    await fs.access(context.stateDir);
+    await fs.access(human.stateDir);
 
-    const declined = await tool.execute('cleanup-declined', params, undefined, undefined, {
+    const declined = await tool.execute('cleanup-human-declined', params, undefined, undefined, {
       hasUI: true,
       ui: { confirm: async () => { confirmCalls += 1; return false; } },
     });
     assert.equal(declined.isError, true);
     assert.equal(declined.details.error.code, 'approval_required');
     assert.equal(confirmCalls, 1);
-    await fs.access(context.stateDir);
+    await fs.access(human.stateDir);
 
     let confirmationText = '';
-    const approved = await tool.execute('cleanup-approved', params, undefined, undefined, {
+    const approved = await tool.execute('cleanup-human-approved', params, undefined, undefined, {
       hasUI: true,
       ui: { confirm: async (_title, text) => { confirmationText = text; return true; } },
     });
     assert.equal(approved.isError, undefined);
     assert.match(confirmationText, /destructive retained-pool generation reset/);
-    await assert.rejects(fs.access(context.stateDir), { code: 'ENOENT' });
+    await assert.rejects(fs.access(human.stateDir), { code: 'ENOENT' });
   } finally {
-    await dispose(context);
+    await dispose(human);
   }
 });
 

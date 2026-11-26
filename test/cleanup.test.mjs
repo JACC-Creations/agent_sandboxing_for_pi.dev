@@ -88,6 +88,33 @@ test('ProjFS cleanup lifecycle lock deterministically excludes new task and huma
   }
 });
 
+test('ProjFS human-slot creation holds the lifecycle lock through provider startup and finalization', async () => {
+  const broker = await makeProjfsBroker(1, ['--provider-ready-timeout-ms', '2000']);
+  const gate = path.join(broker.temporaryRoot, 'release-human-provider');
+  try {
+    const creating = run([
+      'human-slot', 'create', '--state-dir', broker.stateDir, '--name', 'racing-human',
+    ], { env: { AGENT_WORKSPACE_TEST_PROVIDER_LIFECYCLE_GATE: gate }, timeout: 120000 });
+    await waitForProviderState(broker.stateDir, 'starting');
+    let cleanupSettled = false;
+    const cleaning = run(['cleanup', '--state-dir', broker.stateDir], { timeout: 120000 })
+      .finally(() => { cleanupSettled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(cleanupSettled, false);
+
+    await fs.writeFile(gate, 'release');
+    const [created, cleaned] = await Promise.all([creating, cleaning]);
+    assert.equal(JSON.parse(created.stdout).humanOwnerState, 'ready');
+    assert.equal(JSON.parse(cleaned.stdout).state, 'completed');
+    await assert.rejects(fs.access(broker.stateDir), { code: 'ENOENT' });
+    await assert.rejects(fs.access(`${broker.stateDir}.lifecycle`), { code: 'ENOENT' });
+    await assert.rejects(fs.access(path.join(broker.rootParent, 'Workspace1')), { code: 'ENOENT' });
+  } finally {
+    await fs.writeFile(gate, 'release').catch(() => {});
+    await cleanup(broker);
+  }
+});
+
 test('ProjFS cleanup serializes with provider creation and final rerun launch', async () => {
   const providerBroker = await makeProjfsBroker(1, ['--provider-ready-timeout-ms', '2000']);
   try {

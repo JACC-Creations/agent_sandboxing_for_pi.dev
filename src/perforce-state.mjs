@@ -16,7 +16,6 @@ import {
   planP4HandoffResources,
   provisionSlotClient,
   reshelveHandoff,
-  readP4ServerBinding,
   validateDiscoverBase,
   verifyHandoffShelf,
   verifySlotClient,
@@ -28,6 +27,7 @@ import {
   replaceOwnershipResource,
   replaceOwnershipResources,
 } from './ownership.mjs';
+import { discoverControlledP4Profile, resolveP4Executable } from './perforce-reconnect.mjs';
 import { atomicWriteJson, listTasks, readJson, readTask, statePaths, withLock, writeTask } from './state.mjs';
 
 const terminalTaskStates = new Set(['completed', 'artifact_failed', 'failed', 'timed_out', 'cancelled', 'termination_failed', 'handed_off']);
@@ -47,25 +47,7 @@ export function makeConfiguredP4(config) {
   });
 }
 
-export async function resolveP4Executable(executable, environment = process.env) {
-  const candidate = String(executable ?? '');
-  if (!candidate) throw new Error('Perforce executable is required');
-  if (path.isAbsolute(candidate) || /[\\/]/.test(candidate)) {
-    const resolved = path.resolve(candidate);
-    if (!await fs.stat(resolved).then((stats) => stats.isFile(), () => false)) throw new Error(`Perforce executable is not a file: ${resolved}`);
-    return resolved;
-  }
-  const extensions = process.platform === 'win32'
-    ? (environment.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)
-    : [''];
-  for (const directory of String(environment.PATH ?? '').split(path.delimiter).filter(Boolean)) {
-    for (const extension of extensions) {
-      const resolved = path.resolve(directory, process.platform === 'win32' && path.extname(candidate) ? candidate : `${candidate}${extension}`);
-      if (await fs.stat(resolved).then((stats) => stats.isFile(), () => false)) return resolved;
-    }
-  }
-  throw new Error(`Perforce executable could not be resolved: ${candidate}`);
-}
+export { resolveP4Executable };
 
 export async function discoverP4Configuration(options, workspace) {
   if (!options.p4Exe && !options.p4BaseClient && !options.p4Port && !options.p4User && !options.p4Charset
@@ -75,36 +57,32 @@ export async function discoverP4Configuration(options, workspace) {
   if (!options.testMode && (options.p4FakeRegistry || /\.(?:mjs|cjs|js|cmd|bat|ps1)$/i.test(options.p4Exe))) {
     throw new Error('script Perforce executables and fake registries require --test-mode');
   }
+  const test = options.testMode ? {
+    fakeScript: await resolveP4Executable(options.p4Exe),
+    fakeRegistry: path.resolve(options.p4FakeRegistry),
+  } : undefined;
+  const { profile, p4 } = await discoverControlledP4Profile({
+    executable: options.p4Exe,
+    user: options.p4User ?? process.env.P4USER,
+    explicit: {
+      port: options.p4Port,
+      charset: options.p4Charset,
+      ticketFile: options.p4Tickets,
+      trustFile: options.p4Trust,
+    },
+    test,
+  });
   const value = {
     enabled: true,
-    executable: await resolveP4Executable(options.p4Exe),
+    executable: profile.executable,
     baseClient: options.p4BaseClient,
-    port: options.p4Port,
-    user: options.p4User ?? process.env.P4USER,
-    charset: options.p4Charset,
-    ticketFile: options.p4Tickets ? path.resolve(options.p4Tickets) : undefined,
-    trustFile: options.p4Trust ? path.resolve(options.p4Trust) : undefined,
-    ...(options.testMode ? { fakeRegistry: options.p4FakeRegistry } : {}),
-  };
-  const config = { testMode: options.testMode === true, p4: value };
-  const p4 = makeConfiguredP4(config);
-  const binding = await readP4ServerBinding(p4);
-  if (!value.user) value.user = binding.user;
-  if (value.user !== binding.user) throw new Error('configured Perforce user does not match the live user');
-  value.port ??= (await p4.run(['info'])).records.find((record) => record.userName === binding.user)?.serverAddress;
-  if (!value.port) throw new Error('Perforce port could not be discovered; pass --p4-port');
-  config.p4.user = value.user;
-  config.p4.port = value.port;
-  value.reconnect = {
-    version: 1,
-    executable: value.executable,
-    port: value.port,
-    user: value.user,
-    ...(value.charset ? { charset: value.charset } : {}),
-    ...(value.ticketFile ? { ticketFile: value.ticketFile } : {}),
-    ...(value.trustFile ? { trustFile: value.trustFile } : {}),
-    ...(options.testMode ? { testMode: true, fakeScript: value.executable, fakeRegistry: value.fakeRegistry } : {}),
-    serverFingerprint: binding.fingerprint,
+    port: profile.port,
+    user: profile.user,
+    charset: profile.charset,
+    ticketFile: profile.ticketFile,
+    trustFile: profile.trustFile,
+    ...(options.testMode ? { fakeRegistry: profile.fakeRegistry } : {}),
+    reconnect: profile,
   };
   const baseline = await validateDiscoverBase(p4, { baseClient: value.baseClient, expectedLowerRoot: workspace });
   value.baseline = baselineSummary(baseline);

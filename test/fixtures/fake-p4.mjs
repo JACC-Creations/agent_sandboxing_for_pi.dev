@@ -106,6 +106,14 @@ await withRegistry(async (state) => {
   }
 
   if (command === 'info') {
+    if (state.requiredPort !== undefined && process.env.P4PORT !== state.requiredPort) {
+      return fail('configured endpoint is unavailable');
+    }
+    if (state.endpointFaults?.[process.env.P4PORT]?.times > 0) {
+      const endpointFault = state.endpointFaults[process.env.P4PORT];
+      endpointFault.times -= 1;
+      return fail(endpointFault.error ?? 'configured endpoint fault');
+    }
     process.stdout.write(tagged({
       userName: process.env.P4USER ?? state.user ?? 'agent',
       serverAddress: state.serverAddress ?? process.env.P4PORT ?? 'fake:1666',

@@ -2,13 +2,16 @@ import { CONFIG_DIR_NAME, defineTool, type ExtensionAPI, type ExtensionContext }
 import { Type } from "typebox";
 import {
 	checkpointAgentWorkspaceP4,
-	cleanupAgentWorkspace,
 	handoffAgentWorkspaceP4,
 	inspectAgentWorkspace,
 	openAgentWorkspaceP4,
 	unshelveAgentWorkspaceP4,
 } from "../../src/api.mjs";
-import { disposeAgentWorkspaceP4HandoffAfterApproval } from "../../src/internal-api.mjs";
+import {
+	cleanupAgentWorkspaceAfterApproval,
+	disposeAgentWorkspaceP4HandoffAfterApproval,
+	inspectAgentWorkspaceCleanupRequirement,
+} from "../../src/internal-api.mjs";
 import { revisionControlCompletions, runRevisionControlCommand } from "../../src/revision-control-command.mjs";
 
 const StateSchema = Type.Object({
@@ -289,7 +292,7 @@ const disposeHandoffTool = defineTool({
 const cleanupTool = defineTool({
 	name: "agent_workspace_cleanup",
 	label: "Agent Workspace Cleanup",
-	description: "Destructively clean one exact broker generation after interactive approval because retained projected roots or human slots may contain user work.",
+	description: "Clean one exact broker generation autonomously when it has no human slots; retained projected roots or human slots may contain user work, so generations with human slots require interactive approval.",
 	exposure: "direct",
 	executionMode: "sequential",
 	annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
@@ -297,10 +300,24 @@ const cleanupTool = defineTool({
 	outputSchema: ResultSchema,
 	async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 		try {
-			await approveMutation(ctx, signal, "workspace cleanup", params.brokerUuid, "none (generation-wide cleanup)", [
-				"Effect: destructive retained-pool generation reset",
-			]);
-			const value = await cleanupAgentWorkspace({ stateDir: params.stateDir, expectedBrokerUuid: params.brokerUuid });
+			requireMutationNotAborted(signal);
+			const requirement = await inspectAgentWorkspaceCleanupRequirement({
+				stateDir: params.stateDir,
+				brokerUuid: params.brokerUuid,
+			});
+			if (!requirement.brokerUuidMatches) throw new Error("broker generation changed before cleanup approval");
+			const allowHumanSlots = requirement.hasHumanSlots;
+			if (!requirement.completed && allowHumanSlots) {
+				await approveMutation(ctx, signal, "workspace cleanup", params.brokerUuid, "none (generation-wide cleanup)", [
+					"Effect: destructive retained-pool generation reset including human slots",
+				]);
+			}
+			requireMutationNotAborted(signal);
+			const value = await cleanupAgentWorkspaceAfterApproval({
+				stateDir: params.stateDir,
+				brokerUuid: params.brokerUuid,
+				allowHumanSlots,
+			});
 			const details = { ok: true, operation: "cleanup", brokerUuid: params.brokerUuid, result: value };
 			return resultContent(details, `Cleaned broker generation ${params.brokerUuid}${value.idempotent ? " (already complete)" : ""}.`);
 		} catch (error) {

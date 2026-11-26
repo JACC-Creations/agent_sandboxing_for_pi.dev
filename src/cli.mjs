@@ -88,6 +88,7 @@ export async function main(argv) {
       }
       console.log(JSON.stringify(withoutPrivateReconnectBinding(await cleanupBroker(stateDir, {
         expectedBrokerUuid: requiredStringFlag(flags, 'broker-uuid'),
+        allowHumanSlots: true,
       })), null, 2));
       return;
     case '_worker':

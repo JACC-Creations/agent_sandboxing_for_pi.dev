@@ -132,7 +132,7 @@ export function createP4(options = {}) {
     async run(args, runOptions = {}) {
       if (!Array.isArray(args) || args.some((arg) => typeof arg !== 'string' || /[\0\r\n]/.test(arg))) throw new Error('P4 arguments must be an array of strings without control newlines');
       const requestedMax = runOptions.maxOutputBytes ?? maxOutputBytes;
-      if (!Number.isSafeInteger(requestedMax) || requestedMax < 1024 || requestedMax > maxBoundedOutputBytes) throw new Error('bounded p4 output limit is invalid');
+      if (!Number.isSafeInteger(requestedMax) || requestedMax < 1 || requestedMax > maxBoundedOutputBytes) throw new Error('bounded p4 output limit is invalid');
       const argv = [...prefixArgs, '-ztag', ...clientArguments(runOptions.client), ...args];
       try {
         const result = await executeFile(executable, argv, { cwd: options.cwd, env: environment(), input: runOptions.input, timeoutMs, maxOutputBytes: requestedMax });
@@ -670,7 +670,7 @@ function matchingShelfResource(resources, changeResource) {
     && resource.taskId === changeResource.taskId && resource.brokerUuid === changeResource.brokerUuid && resource.nonce === changeResource.nonce);
 }
 
-export async function cleanupResources(p4, options) {
+export async function inspectCleanupResources(p4, options) {
   if (options.workersStopped !== true) throw new Error('cleanup requires workersStopped === true fence');
   const resources = options.resources ?? [];
   if (resources.some((resource) => resource.handedOff)) throw new Error('cleanup rejects handed-off resources');
@@ -707,7 +707,12 @@ export async function cleanupResources(p4, options) {
     const pending = (await p4.run(['changes', '-s', 'pending', '-c', resource.client])).records.filter((record) => record.change);
     if (pending.some((record) => !allowed.has(String(record.change)))) throw new Error(`client '${resource.client}' has unrecorded pending changes`);
   }
+  return { changes, clients, foundLiveResource };
+}
 
+export async function cleanupResources(p4, options) {
+  const resources = options.resources ?? [];
+  const { changes, clients, foundLiveResource } = await inspectCleanupResources(p4, options);
   for (const resource of changes) {
     let form = await changeOrNull(p4, resource);
     if (!form) continue;

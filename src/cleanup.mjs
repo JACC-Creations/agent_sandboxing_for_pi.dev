@@ -5,6 +5,8 @@ import { queryOwnedJobEmpty, readOwnedProcess, terminateOwned } from './process-
 import { stopOwnedGenerationSupervisor, stopOwnedLowerGuard, stopOwnedProvider } from './projfs.mjs';
 import { atomicWriteJson, delay, isProcessAlive, listTasks, readJson, readJsonIfPresent, statePaths, withLifecycleLock, writeTask } from './state.mjs';
 import { revisionControlBackend } from './revision-control.mjs';
+import { createControlledP4, discoverControlledP4Profile, validateReconnectProfile, verifyControlledEndpoint } from './perforce-reconnect.mjs';
+import { inspectCleanupResources } from './perforce.mjs';
 import { canonicalizeForSafety, externalCleanupPaths, pathsOverlap, verifyOwnedDirectory } from './ownership.mjs';
 
 export async function cleanupBroker(stateDir, options = {}) {
@@ -94,11 +96,15 @@ async function cleanupBrokerExclusive(stateDir, options) {
     });
     await atomicWriteJson(external.journal, journal);
   }
+  const hasHumanSlots = journal.slots.slots.some((slot) => slot.humanOwner || slot.humanOwnerState);
+  if (hasHumanSlots && options.allowHumanSlots !== true) {
+    throw new Error('cleanup refused: human slots require explicit approval');
+  }
   if (journal.state === 'completed') return journal;
   if (journal.state === 'failed') {
     journal.state = 'in_progress';
     journal.errors = [];
-    for (const phase of ['cancel_tasks', 'workers_stopped', 'recover_p4_handoffs', 'remove_queue_and_permits', 'cleanup_owned_integrations', 'stop_generation_supervisor', 'stop_lower_guard', 'stop_providers', 'owned_jobs_stopped', 'delete_owned_roots', 'delete_private_state']) {
+    for (const phase of ['cancel_tasks', 'workers_stopped', 'prepare_p4_endpoint', 'recover_p4_handoffs', 'remove_queue_and_permits', 'cleanup_owned_integrations', 'stop_generation_supervisor', 'stop_lower_guard', 'stop_providers', 'owned_jobs_stopped', 'delete_owned_roots', 'delete_private_state']) {
       delete journal.phases[phase];
     }
   }
@@ -188,6 +194,9 @@ async function cleanupBrokerExclusive(stateDir, options) {
   });
 
   if (errors.length === 0) {
+    await runPhase(journal, external.journal, 'prepare_p4_endpoint', async () => {
+      journal.config = await prepareCleanupP4Endpoint(journal, external.journal, options);
+    });
     await runPhase(journal, external.journal, 'recover_p4_handoffs', async () => {
       const revisionBackend = revisionControlBackend(journal.config);
       if (revisionBackend.isEnabled(journal.config)) {
@@ -344,8 +353,99 @@ async function cleanupBrokerExclusive(stateDir, options) {
     ...(journal.config.p4?.enabled ? { p4Reconnect: journal.config.p4.reconnect } : {}),
   };
   await atomicWriteJson(external.receipt, completed);
-  await atomicWriteJson(external.journal, { ...completed, phases: journal.phases });
+  await atomicWriteJson(external.journal, {
+    ...completed,
+    phases: journal.phases,
+    ...(journal.p4Recovery ? { p4Recovery: journal.p4Recovery } : {}),
+  });
   return completed;
+}
+
+function recoveredP4Config(config, profile) {
+  return {
+    ...config,
+    p4: {
+      ...config.p4,
+      executable: profile.executable,
+      port: profile.port,
+      user: profile.user,
+      charset: profile.charset,
+      ticketFile: profile.ticketFile,
+      trustFile: profile.trustFile,
+      ...(profile.testMode ? { fakeRegistry: profile.fakeRegistry } : {}),
+      reconnect: profile,
+    },
+  };
+}
+
+function validateCleanupRecovery(binding, journal) {
+  if (!binding || binding.version !== 1 || binding.brokerUuid !== journal.brokerUuid
+    || path.resolve(binding.stateDir ?? '') !== path.resolve(journal.stateDir)
+    || typeof binding.boundAt !== 'string' || !Number.isFinite(Date.parse(binding.boundAt))) {
+    throw new Error('cleanup refused: invalid endpoint recovery binding');
+  }
+  const profile = validateReconnectProfile(binding.profile);
+  const persisted = validateReconnectProfile(journal.config.p4.reconnect);
+  if (profile.user !== persisted.user || profile.serverFingerprint !== persisted.serverFingerprint
+    || profile.executable !== persisted.executable) {
+    throw new Error('cleanup refused: endpoint recovery binding identity mismatch');
+  }
+  return profile;
+}
+
+async function preflightRecoveredResources(journal, p4) {
+  const resources = journal.ownership.resources.filter((resource) => resource.handedOff !== true
+    && ['p4-client', 'p4-change', 'p4-shelf'].includes(resource.type));
+  await inspectCleanupResources(p4, { resources, workersStopped: true });
+}
+
+async function prepareCleanupP4Endpoint(journal, journalPath, options) {
+  const backend = revisionControlBackend(journal.config);
+  if (!backend.isEnabled(journal.config)) return journal.config;
+  const persisted = validateReconnectProfile(journal.config.p4.reconnect);
+  if (journal.p4Recovery) {
+    if (options.allowEndpointRecovery !== true) {
+      throw new Error('cleanup refused: endpoint recovery requires internal authorization');
+    }
+    const profile = validateCleanupRecovery(journal.p4Recovery, journal);
+    const p4 = createControlledP4(profile);
+    await verifyControlledEndpoint(p4, profile);
+    await preflightRecoveredResources(journal, p4);
+    return recoveredP4Config(journal.config, profile);
+  }
+
+  try {
+    const p4 = createControlledP4(persisted);
+    await verifyControlledEndpoint(p4, persisted);
+    return journal.config;
+  } catch (error) {
+    if (options.allowEndpointRecovery !== true) throw error;
+  }
+
+  const test = persisted.testMode ? {
+    fakeScript: persisted.fakeScript,
+    fakeRegistry: persisted.fakeRegistry,
+  } : undefined;
+  const { profile, p4 } = await discoverControlledP4Profile({
+    executable: persisted.executable,
+    expectedUser: persisted.user,
+    expectedFingerprint: persisted.serverFingerprint,
+    test,
+  });
+  await preflightRecoveredResources(journal, p4);
+  journal.p4Recovery = {
+    version: 1,
+    brokerUuid: journal.brokerUuid,
+    stateDir: journal.stateDir,
+    boundAt: new Date().toISOString(),
+    profile,
+  };
+  journal.updatedAt = new Date().toISOString();
+  await atomicWriteJson(journalPath, journal);
+  if (process.env.AGENT_WORKSPACE_TEST_FAIL_AFTER_CLEANUP_RECOVERY_BINDING === '1') {
+    throw new Error('simulated crash after cleanup endpoint recovery binding');
+  }
+  return recoveredP4Config(journal.config, profile);
 }
 
 async function validateCompletedReceipt(stateDir, receipt, currentConfig) {

@@ -352,6 +352,20 @@ test('public disposal refuses an unbound legacy receipt without binding or Perfo
   }
 });
 
+test('production legacy adoption resolves the imported ambient executable path before Perforce access', async () => {
+  const context = await setup({ receipt: (value) => { value.version = 1; delete value.p4Reconnect; } });
+  const prior = process.env.P4EXE;
+  process.env.P4EXE = path.join(context.temporaryRoot, 'missing-production-p4.exe');
+  try {
+    await assert.rejects(disposeP4ReviewWithLegacyAdoption(context.options), /p4_executable_unavailable/);
+    assert.deepEqual(destructiveCommands(await registry(context)), []);
+    await assert.rejects(fs.access(`${context.stateDir}.review-disposal-${transaction}.binding.json`), { code: 'ENOENT' });
+  } finally {
+    if (prior === undefined) delete process.env.P4EXE; else process.env.P4EXE = prior;
+    await dispose(context);
+  }
+});
+
 test('legacy adoption verifies the controlled endpoint and exact resources before binding', async () => {
   const context = await setup({ receipt: (value) => { value.version = 1; delete value.p4Reconnect; } });
   const profile = {
