@@ -394,23 +394,6 @@ async function monitorRecoveredProcess(stateDir, taskId, config, token) {
     if (!stoppingFor && config.adapter === 'projfs' && !await verifyProviderAlive(stateDir, config, decision)) {
       stoppingFor = 'provider_died';
     }
-    const identity = await getProcessIdentity(decision.pid);
-    const launcherState = classifyLauncherIdentity(identity, decision.launcherIdentity, isProcessAlive(decision.pid));
-    if (launcherState !== 'matching') {
-      if (launcherState === 'unknown-live') {
-        await delay(config.pollMs);
-        continue;
-      }
-      if (stoppingFor) {
-        await finishRecoveredStopped(stateDir, taskId, config, token, stoppingFor);
-      } else if (decision.launcherIdentity) {
-        await finishInterrupted(stateDir, taskId, config, token);
-      } else {
-        await finishUnverifiableRecovery(stateDir, taskId, token);
-      }
-      return;
-    }
-
     if (stoppingFor) {
       const confirmed = await terminateTask(stateDir, taskId, config, token);
       if (confirmed) {
@@ -420,6 +403,21 @@ async function monitorRecoveredProcess(stateDir, taskId, config, token) {
       }
       return;
     }
+    const identity = await getProcessIdentity(decision.pid);
+    const launcherState = classifyLauncherIdentity(identity, decision.launcherIdentity, isProcessAlive(decision.pid));
+    if (launcherState !== 'matching') {
+      if (launcherState === 'unknown-live') {
+        await delay(config.pollMs);
+        continue;
+      }
+      if (decision.launcherIdentity) {
+        await finishInterrupted(stateDir, taskId, config, token);
+      } else {
+        await finishUnverifiableRecovery(stateDir, taskId, token);
+      }
+      return;
+    }
+
     await delay(config.pollMs);
   }
 }
@@ -725,18 +723,16 @@ async function finishTerminationFailure(stateDir, taskId, token, reason) {
 
 async function terminateTask(stateDir, taskId, config, token) {
   const task = await readTask(stateDir, taskId);
+  if (config.adapter === 'projfs'
+    && (!task.processOwnership || !await readOwnedProcess(task.processOwnership))) return false;
   for (let attempt = 1; attempt <= config.terminationAttempts; attempt += 1) {
     let errorMessage = null;
     try {
-      if (task.launcherIdentity) {
+      if (config.adapter === 'projfs') {
+        await terminateOwned(config, task.processOwnership, config.terminationWaitMs);
+      } else if (task.launcherIdentity) {
         const identity = await getProcessIdentity(task.pid);
-        if (identity === task.launcherIdentity) {
-          if (config.adapter === 'projfs' && task.processOwnership) {
-            await terminateOwned(config, task.processOwnership, config.terminationWaitMs);
-          } else {
-            await terminateTree(task.pid);
-          }
-        }
+        if (identity === task.launcherIdentity) await terminateTree(task.pid);
       }
     } catch (error) {
       errorMessage = error.message;
@@ -751,9 +747,11 @@ async function terminateTask(stateDir, taskId, config, token) {
 
     const deadline = Date.now() + config.terminationWaitMs;
     while (Date.now() < deadline) {
-      const identity = await getProcessIdentity(task.pid);
-      if (task.launcherIdentity && identity !== task.launcherIdentity) {
-        return true;
+      if (config.adapter === 'projfs') {
+        if (await queryOwnedJobEmpty(config, task.processOwnership, config.terminationWaitMs)) return true;
+      } else {
+        const identity = await getProcessIdentity(task.pid);
+        if (task.launcherIdentity && identity !== task.launcherIdentity) return true;
       }
       await delay(50);
     }

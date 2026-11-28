@@ -691,16 +691,34 @@ export async function getTasks(stateDir) {
 export async function cancelTask(stateDir, taskId) {
   validateTaskId(taskId);
   await recoverTasks(stateDir, null, taskId);
-  return withLock(stateDir, `task-${taskId}`, async () => {
+  const cancelled = await withLock(stateDir, `task-${taskId}`, async () => {
     const task = await readTask(stateDir, taskId);
-    if (terminalStates.has(task.state)) {
-      return task;
-    }
-    const now = new Date().toISOString();
+    if (task.state === 'termination_failed') return null;
+    if (terminalStates.has(task.state)) return task;
     task.state = 'cancel_requested';
-    task.cancelRequestedAt ??= now;
+    task.cancelRequestedAt ??= new Date().toISOString();
     await updateLogStats(task);
     await writeTask(stateDir, task);
+    return task;
+  });
+  if (cancelled) return cancelled;
+  const config = await loadConfig(stateDir);
+  return withLifecycleLock(stateDir, async () => {
+    await assertNoCleanupInProgress(stateDir);
+    await assertBrokerGeneration(stateDir, config.brokerUuid);
+    let retryTermination = false;
+    const task = await withLock(stateDir, `task-${taskId}`, async () => {
+      const current = await readTask(stateDir, taskId);
+      if (current.state !== 'termination_failed') return current;
+      retryTermination = true;
+      current.state = 'cancel_requested';
+      current.cancelRequestedAt ??= new Date().toISOString();
+      current.monitorToken = null;
+      await updateLogStats(current);
+      await writeTask(stateDir, current);
+      return current;
+    });
+    if (retryTermination) await launchMonitor(stateDir, taskId, true);
     return task;
   });
 }
